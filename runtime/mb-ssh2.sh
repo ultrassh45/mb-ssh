@@ -34,6 +34,13 @@ R2_REMOTE="${R2_REMOTE:-}"
 R2_PATH="${R2_PATH:-mb-ssh/$(hostname)}"
 TG_BOT_TOKEN="${TG_BOT_TOKEN:-}"
 TG_CHAT_ID="${TG_CHAT_ID:-}"
+REPO_URL="${REPO_URL:-}"
+REPO_BRANCH="${REPO_BRANCH:-main}"
+SRC_DIR="${SRC_DIR:-/opt/mb-ssh-src}"
+BIN_DIR="${BIN_DIR:-/usr/local/bin}"
+UNIT_DIR="${UNIT_DIR:-/etc/systemd/system}"
+ROLLBACK_DIR="${ROLLBACK_DIR:-$STATE_DIR/rollback}"
+UPDATE_CACHE="${UPDATE_CACHE:-/run/mb-ssh/update-available.txt}"
 BADVPN_BIN="${BADVPN_BIN:-/usr/local/bin/badvpn-udpgw}"
 BADVPN_PORT_BASE="${BADVPN_PORT_BASE:-17000}"
 DROPBEAR_PORT="${DROPBEAR_PORT:-22022}"
@@ -542,6 +549,185 @@ do_restore() {
   log "restore OK dari $R2_REMOTE:$R2_PATH — jalankan: systemctl restart mb-edge"
 }
 
+_update_check() {
+  # bandingkan commit local runtime dengan origin/<branch>.
+  # Keluar 0 = update tersedia (cache rincian ditulis), 1 = sudah terbaru,
+  # 2 = repo tak ada / REPO_URL kosong / no git dir (tak bisa cek)
+  command -v git >/dev/null || { echo "git tidak ada"; return 2; }
+  [[ -z $REPO_URL ]] && { echo "REPO_URL kosong — set via setup"; return 2; }
+  if [[ ! -d $SRC_DIR/.git ]]; then
+    rm -rf "$SRC_DIR" && mkdir -p "$(dirname "$SRC_DIR")"
+    git clone -q --depth 20 "$REPO_URL" "$SRC_DIR" 2>/dev/null || { echo "clone gagal"; return 2; }
+  fi
+  git -C "$SRC_DIR" fetch -q origin "$REPO_BRANCH" 2>/dev/null || { echo "fetch gagal"; return 2; }
+  local cur new
+  cur=$(git -C "$SRC_DIR" rev-parse --short HEAD 2>/dev/null)
+  new=$(git -C "$SRC_DIR" rev-parse --short "origin/$REPO_BRANCH" 2>/dev/null)
+  if [[ -n $cur && $cur != $new ]]; then
+    mkdir -p "$(dirname "$UPDATE_CACHE")" 2>/dev/null
+    git -C "$SRC_DIR" log --oneline -8 "$cur..origin/$REPO_BRANCH" > "$UPDATE_CACHE" 2>/dev/null
+    echo "HEAD_NEW=$new" >> "$UPDATE_CACHE"
+    echo "HELPER_CACHE=1" >> "$UPDATE_CACHE"
+    echo "UPDATE:$cur→$new ($(git -C "$SRC_DIR" log --oneline -1 "$new" | head -1))"
+    return 0
+  fi
+  rm -f "$UPDATE_CACHE" 2>/dev/null
+  echo "up-to-date: $cur"
+  return 1
+}
+
+_snapshot() {
+  # arsip KODE + config NON-destroy saat ini → rollback/<ts>/ ; KODE asli runtime
+  # disebut .ro. Digunakan do_update & do_rollback.
+  local dv=bin conf
+  dv="$ROLLBACK_DIR" && mkdir -p "$ROLLBACK_DIR"
+  conf="$CONF_DIR"
+  for f in mb-ssh2.sh mb-edge.py mb-tgbot.py mb-ssh2-cleanup.sh; do
+    [[ -f "$BIN_DIR/$f" ]] && cp -a "$BIN_DIR/$f" "$ROLLBACK_DIR/$f"
+  done
+  for f in mb.conf edge.json stunnel-mb-ssh.conf; do
+    [[ -f "$conf/$f" ]] && cp -a "$conf/$f" "$ROLLBACK_DIR/$f"
+  done
+  echo "$ROLLBACK_DIR"
+}
+
+_verify() {
+  # verifikasi sistem setelah update — 0 = OK, 1 = gagal
+  local allok=1
+  # 1. syntax semua file runtime
+  bash -n "$BIN_DIR/mb-ssh2.sh" && bash -n "$BIN_DIR/mb-ssh2-cleanup.sh" || allok=0
+  python3 -m py_compile "$BIN_DIR/mb-edge.py" "$BIN_DIR/mb-tgbot.py" 2>/dev/null || allok=0
+  # 2. systemd unit valid + services up
+  systemctl daemon-reload 2>/dev/null || allok=0
+  # 3. edge API :8499 (config-basis) — pakai nilai dari edge.json
+  local apiport aptok
+  apiport=$(python3 -c "import json; print(json.load(open('$CONF_DIR/edge.json'))['api']['port'])" 2>/dev/null || echo 8499)
+  aptok=$(python3 -c "import json; print(json.load(open('$CONF_DIR/edge.json'))['api'].get('token',''))" 2>/dev/null)
+  [[ $apiport == 8499 ]] || echo "API port non-default: $apiport"
+  return $((!allok))
+}
+
+_restore_snapshot() {
+  # tarik kembali file runtime + config dari snapshot (data user tdk tersentuh)
+  local rb="$1"
+  [[ -d $rb ]] || { log "snapshot $rb tidak ada"; return 1; }
+  local f
+  for f in mb-ssh2.sh mb-edge.py mb-tgbot.py mb-ssh2-cleanup.sh; do
+    [[ -f "$rb/$f" ]] && install -m 755 "$rb/$f" "$BIN_DIR/$f"
+  done
+  for f in mb.conf edge.json stunnel-mb-ssh.conf; do
+    [[ -f "$rb/$f" ]] && cp -a "$rb/$f" "$CONF_DIR/$f"
+  done
+  return 0
+}
+
+do_update() {
+  # update script dari git repo (REPO_URL/REPO_BRANCH di mb.conf)
+  # alur: --check → snapshot → pasang → _verify → gagal? auto-rollback (data utuh)
+  local rc rb
+  _update_check; rc=$?
+  if [[ $rc -eq 1 || $rc -eq 2 ]]; then
+    log "tidak ada update tersedia (rc=$rc)"
+    return 0
+  fi
+  [[ $rc -eq 0 ]] || { log "update --check gagal (rc=$rc)"; return 1; }
+  rb=$(_snapshot)
+  log "update tersedia — snapshot $rb"
+  # sinkronkan worktree ke origin (fetch saja tidak update working tree)
+  git -C "$SRC_DIR" fetch -q origin "$REPO_BRANCH" 2>/dev/null || { log "fetch ulang gagal — abort"; return 1; }
+  git -C "$SRC_DIR" reset -q --hard "origin/$REPO_BRANCH" 2>/dev/null || { log "reset gagal — abort"; return 1; }
+  local newrev
+  newrev=$(git -C "$SRC_DIR" rev-parse --short HEAD 2>/dev/null)
+  # pasang runtime baru (config TIDAK pernah ditimpa — run.sh sudah idempotent)
+  local f
+  for f in mb-ssh2.sh mb-edge.py mb-tgbot.py mb-ssh2-cleanup.sh; do
+    [[ -f "$SRC_DIR/runtime/$f" ]] && install -m 755 "$SRC_DIR/runtime/$f" "$BIN_DIR/$f"
+  done
+  # unit systemd baru (tidak sentuh conffile user)
+  for u in mb-edge dropbear-client mb-tgbot; do
+    [[ -f "$SRC_DIR/systemd/$u.service" ]] && install -m 644 "$SRC_DIR/systemd/$u.service" "$UNIT_DIR/$u.service"
+  done
+  if _verify; then
+    rm -f "$UPDATE_CACHE"
+    log "verifikasi OK — selesai (runtime ${newrev:-?})"
+    if [[ ${MB_TEST:-0} != 1 ]] && command -v systemctl >/dev/null 2>&1; then
+      systemctl daemon-reload
+      systemctl restart mb-edge dropbear-client mb-tgbot 2>/dev/null || true
+    fi
+  else
+    log "VERIFIKASI GAGAL — rollback otomatis dari snapshot $rb"
+    _restore_snapshot "$rb"
+    log "rollback selesai — data user TIDAK tersentuh, kembali ke versi lama"
+    rm -f "$UPDATE_CACHE"
+    return 1
+  fi
+}
+
+do_rollback() {
+  # rollback manual: mb-ssh2 rollback <path-snapshot>
+  local rb="${1:-}"
+  [[ -n $rb ]] || die "usage: mb-ssh2 rollback <snapshot>  (lihat: ls $ROLLBACK_DIR)"
+  _restore_snapshot "$rb"
+  if _verify; then
+    log "rollback OK ke $rb — restart service"
+    if [[ ${MB_TEST:-0} != 1 ]] && command -v systemctl >/dev/null 2>&1; then
+      systemctl daemon-reload
+      systemctl restart mb-edge dropbear-client mb-tgbot 2>/dev/null || true
+    fi
+  else
+    log "rollback juga gagal verifikasi — periksa log update"
+    return 1
+  fi
+}
+
+do_login_check() {
+  # dipanggil tiap login interaktif (via bashrc hook). Tampilkan UPDATE TERSEDIA
+  # + rincian + pilihan Y/N. Up-to-date / tak bisa cek = diam (MOTD normal).
+  local rc line ans
+  _update_check; rc=$?
+  [[ $rc -ne 0 ]] && return 0
+  echo ""
+  echo "============================================================"
+  echo "  ⚠  UPDATE TERSEDIA — mb-ssh2"
+  echo "============================================================"
+  echo "  Rincian perubahan:"
+  while IFS= read -r line; do
+    [[ $line == HEAD_NEW* || $line == HELPER_CACHE* ]] && continue
+    echo "    • $line"
+  done < "$UPDATE_CACHE"
+  echo "============================================================"
+  read -rp "  Jalankan update sekarang? (y/N): " ans
+  case "${ans,,}" in
+    y|ya|yes)
+      do_update
+      echo "  (selesai — login berikutnya normal)"
+      ;;
+    *)
+      echo "  Dilewati. Update tersedia — kapan pun ketik: mb-ssh2 update"
+      ;;
+  esac
+  echo ""
+}
+
+_install_login_hook() {
+  # pasang hook cek-update ke bashrc user admin (idempotent)
+  local u="$1" rcfile
+  [[ -n $u ]] || return 0
+  if [[ $u == root ]]; then
+    rcfile=/root/.bashrc
+  else
+    [[ -d /home/$u ]] || { log "user $u tidak ada — hook login skip"; return 1; }
+    rcfile="/home/$u/.bashrc"
+  fi
+  grep -q "mb-ssh2 login-check" "$rcfile" 2>/dev/null && { log "hook login sudah ada di $rcfile"; return 0; }
+  cat >> "$rcfile" <<'EOF'
+
+# mb-ssh: cek update script saat login (Y = update, N = lewati)
+[ -t 0 ] && [ -x /usr/local/bin/mb-ssh2 ] && /usr/local/bin/mb-ssh2 login-check
+EOF
+  log "hook login terpasang di $rcfile"
+}
+
 _tg_notify() {
   # kirim teks ke chat allow-list via Bot API; no-op kalau bot belum diset
   # atau caller = bot (MB_TG_BOT) agar tidak double-message
@@ -647,6 +833,23 @@ except Exception:
   else
     log "bot dilewati"
   fi
+  # [3/3] update script: REPO_URL + pasang hook login
+  if [[ -z ${1:-} && -z ${2:-} && -z ${3:-} && -z ${4:-} ]]; then
+    echo ""
+    echo "--- [3/3] Update script (auto-rollback) ---"
+    echo "REPO_URL = git repo script (GitHub private). Biarkan kosong utk skip."
+    read -rp "REPO_URL [${REPO_URL:-<kosong>}]: " repou; repou="${repou:-$REPO_URL}"
+  else
+    repou="${REPO_URL:-}"
+  fi
+  if [[ -n $repou ]]; then
+    _conf_set REPO_URL "$repou"
+    _conf_set REPO_BRANCH "$REPO_BRANCH"
+    _install_login_hook "$(logname 2>/dev/null || echo root)"
+    log "REPO_URL tersimpan — saat login akan muncul prompt update (Y/N)"
+  else
+    log "update script dilewati (REPO_URL kosong)"
+  fi
   echo ""
   echo "Verifikasi: mb-ssh2 status"
 }
@@ -732,6 +935,7 @@ do_menu() {
     echo " R2  : ${R2_REMOTE:-<belum diset>}  (${R2_PATH})"
     echo " Bot : ${TG_BOT_TOKEN:+tersambung${TG_CHAT_ID:+ (chat $TG_CHAT_ID)}}${TG_BOT_TOKEN:-<belum diset>}"
     echo " Back: ${BACKUP_INTERVAL:-0} (0 = tiap hari 03:03)"
+    echo " Upd : ${REPO_URL:+sumber git ✓}${REPO_URL:-<belum set — setup>}"
     echo " User: $(python3 -c "import json; print(len(json.load(open('$USERS_JSON'))))" 2>/dev/null || echo 0) akun"
     echo "=============================================="
     echo " 1)  Tambah akun SSH"
@@ -745,6 +949,7 @@ do_menu() {
     echo " 9)  Restore dari R2"
     echo " 10) Status"
     echo " 11) Bantuan bot Telegram"
+    echo " 12) Update script + auto-rollback"
     echo " 0)  Keluar"
     read -rp "Pilih [0-11]: " choice
     case $choice in
@@ -792,6 +997,7 @@ PY
       10) do_status ;;
       11) echo "Perintah bot: /backup  /restore  /status  /help"
           echo "(hanya chat dari TG_CHAT_ID yang diproses)" ;;
+      12) do_update ;;
       0|*) break ;;
     esac
   done
@@ -812,6 +1018,9 @@ case $cmd in
   menu)      do_menu ;;
   backup-cron) apply_backup_cron ;;
   schedule)  do_schedule "$@" ;;
+  update)    [[ ${1:-} == --check ]] && _update_check || do_update ;;
+  rollback)  do_rollback "$@" ;;
+  login-check) do_login_check ;;
   edge-list)   edge_ctl '{"cmd":"list"}' ;;
   help|*)    grep -E "^# " "$0" | head -18 ;;
 esac

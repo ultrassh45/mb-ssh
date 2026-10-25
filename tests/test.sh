@@ -384,6 +384,30 @@ assert '/schedule' in h
 print('help-schedule-OK')" 2>/dev/null | grep -q "help-schedule-OK"
 check $? "bot: /help memuat /schedule"
 
+echo "=== 7g. UPDATE & ROLLBACK (snapshot, tanpa git nyata) ==="
+# _update_check tanpa REPO_URL → rc=2 (tak bisa cek) — jangan crash (rc!=0 = expected)
+bash -c "source $V2/mb-ssh2.sh >/dev/null 2>&1; REPO_URL= _update_check" 2>/dev/null
+[[ $? -ne 0 ]]; check $? "update-check tanpa REPO_URL: rc!=0 (tidak crash, aman)"
+# _snapshot → file kode+config ke rollback; _restore_snapshot balikan
+bash -c "source $V2/mb-ssh2.sh >/dev/null 2>&1
+  SRC_DIR=$T/src BIN_DIR=$T/bin ROLLBACK_DIR=$T/rollback CONF_DIR=$T/conf
+  mkdir -p $T/bin $T/src && printf 'OLD' > $T/bin/mb-ssh2.sh
+  _snapshot && _restore_snapshot $T/rollback && test \"\$(cat $T/bin/mb-ssh2.sh)\" = OLD" 2>/dev/null
+check $? "snapshot→restore: kode pulih (data lain tak tersentuh)"
+# do_update dengan REPO_URL kosong → pesan 'tidak ada update' (no-op)
+bash -c "source $V2/mb-ssh2.sh >/dev/null 2>&1; REPO_URL= do_update" 2>&1 | grep -q "tidak ada update"
+check $? "do_update tanpa repo: no-op aman (data utuh)"
+
+echo "=== 7h. UPDATE LOGIN-PROMPT & HOOK ==="
+# _install_login_hook → tulis ke $HOME/.bashrc test? JANGAN: VPS ini home /root.
+# test safe: panggil dengan user tak ada → return 1
+bash -c "source $V2/mb-ssh2.sh >/dev/null 2>&1; _install_login_hook nenhak" 2>/dev/null
+[[ $? -ne 0 ]]; check $? "hook login: user tak ada → skip aman (rc!=0)"
+# do_login_check dengan REPO_URL kosong → rc=0 tanpa output (tidak hang)
+bash -c "source $V2/mb-ssh2.sh >/dev/null 2>&1; REPO_URL= do_login_check | head -1" 2>/dev/null
+[[ $? -eq 0 ]]; check $? "login-check tanpa repo: no-op (tidak tampil prompt)"
+# do_update --check perlu git; tanpa repo = rc 2 (tidak crash) — sudah dites 7g
+
 echo "=== 8. cleanup ==="
 CLI del test1 >/dev/null 2>&1
 kill -TERM $EDGE_PID 2>/dev/null; wait $EDGE_PID 2>/dev/null
