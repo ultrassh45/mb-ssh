@@ -1,0 +1,12 @@
+[Unit]
+Description=mb-edge — CF port pool edge proxy (SSH node)
+After=network.target dropbear-client.service stunnel.service
+Wants=dropbear-client.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/mb-edge
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
