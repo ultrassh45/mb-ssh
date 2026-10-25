@@ -253,7 +253,7 @@ do_add() {
     if ! spawn_udpgw "$user" "$lp"; then udp=0; fi
     [[ $udp -eq 1 ]] && spec="$spec,\"udpgw\":{\"port\":$udpport,\"target\":\"127.0.0.1:$lp\"}"
   fi
-  spec="$spec,\"quota_gb\":$quota}"
+  spec="$spec,\"quota_gb\":$quota,\"expire_ts\":$pexp}"
 
   edge_alive || die "mb-edge tidak jalan (systemctl start mb-edge)"
   local resp; resp=$(edge_ctl "$spec")
@@ -293,7 +293,7 @@ do_del() {
 
 do_set() {
   local user="$1"; shift || true
-  local days="" bw="" port="" adays="" quota="" unblock=0 rquota=0 warpflag=""
+  local days="" bw="" port="" adays="" quota="" unblock=0 rquota=0 warpflag="" pexp=""
   while [[ $# -gt 0 ]]; do case "$1" in
     --bw) bw="${2:?}"; shift;;
     --port) port="${2:?}"; shift;;
@@ -348,7 +348,7 @@ d['$user'].update({'quota_gb':$quota})
 json.dump(d,open('$USERS_JSON','w'),indent=1)
 "
   fi
-  if [[ -n $bw || -n $quota || $unblock -eq 1 || $rquota -eq 1 ]]; then
+  if [[ -n $bw || -n $quota || -n $pexp || $unblock -eq 1 || $rquota -eq 1 ]]; then
     local spec
     spec=$(python3 -c "
 import json
@@ -356,6 +356,7 @@ d = {'cmd': 'setbw', 'user': '$user'}
 $([[ -n $bw ]] && echo "d['bw_down_mbps'] = $bwd
 d['bw_up_mbps'] = $bwu")
 $([[ -n $quota ]] && echo "d['quota_gb'] = $quota")
+$([[ -n $pexp ]] && echo "d['expire_ts'] = $pexp")
 $([[ $unblock -eq 1 ]] && echo "d['unblock'] = True")
 $([[ $rquota -eq 1 ]] && echo "d['reset_quota'] = True")
 print(json.dumps(d))
@@ -388,7 +389,7 @@ json.dump(d,open('$USERS_JSON','w'),indent=1)
 do_list() {
   if [[ "${1:-}" == "--json" ]]; then
     python3 -c "
-import json
+import json, os, socket
 try:
     u=json.load(open('$USERS_JSON'))
 except Exception:
@@ -397,9 +398,30 @@ try:
     st=json.load(open('$STATS_JSON'))
 except Exception:
     st={}
+# live edge state (blocked) — edge hidup?
+edge={}
+ctl=os.environ.get('EDGE_CTL','/run/mb-ssh/edge.sock')
+if os.path.exists(ctl):
+    try:
+        s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(ctl)
+        s.sendall((json.dumps({'cmd':'list'})+'\n').encode())
+        buf=b''
+        while not buf.endswith(b'\n'):
+            d=s.recv(4096)
+            if not d: break
+            buf+=d
+        s.close()
+        edge=json.loads(buf.decode().strip())
+    except Exception:
+        edge={}
 for k, v in u.items():
     v['stats'] = st.get(k, {'in':0,'out':0,'sessions':0,'active':0})
     v['quota_used'] = v['stats']['in'] + v['stats']['out']
+    e=edge.get('users',{}).get(k)
+    if e:
+        v['blocked']=e.get('blocked')
 print(json.dumps(u, indent=1))
 "
     return

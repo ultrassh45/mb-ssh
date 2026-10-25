@@ -63,8 +63,14 @@ mb-ssh2 restore                                      # tarik balik dari R2
 - **Quota (GB)** : akumulasi byte in+out per akun. Saat `quota_used >= quota_gb`, edge
   auto-blok (koneksi baru ditolak + koneksi aktif ditutup). `--reset-quota` / naikkan
   kuota untuk membuka. 0 = unlimited.
+- **Expire**    : tiap akun punya `expire_ts` (dari `add <days>` / `--add-days`). Saat
+  `now >= expire_ts`, edge auto-blok dengan alasan `expired` (koneksi baru ditolak,
+  koneksi aktif ditutup, loop 60s). `set <user> --add-days N` / PATCH `add_days`
+  memperpanjang → auto unblock `expired`. 0 = unlimited.
 - **Stats**     : byte in/out, sesi total, sesi aktif — persist ke `stats.json` (flush 60s
   + saat remove). Dipakai `list/show --json` dan API.
+- **Blocked live**: `list --json` & API `/v1/users` menyertakan `blocked`
+  (`null`|`"quota"`|`"expired"`) yang dibaca langsung dari edge (bukan snapshot state).
 - **Restore**   : saat edge (re)start, semua user port + udpgw di-load ulang otomatis dari
   `users.json` — reboot node tidak mematikan akun.
 - **WARP**      : edge memonitor `warp-cli --status` tiap 60s; kalau down, auto `warp-cli connect`.
@@ -76,7 +82,7 @@ Rate limit 30 req/menit/IP. Log ke `/var/log/mb-api.log`.
 
 ```
 GET    /v1/health          → {status, uptime_s, users, active_sessions, warp, disk_pct}
-GET    /v1/users           → {user: {..., stats, quota_used}}
+GET    /v1/users           → {user: {..., stats, quota_used, blocked, expire_ts}}
 POST   /v1/users           → {username, days, bw_down, bw_up, udp, backend, warp, quota_gb}
 GET    /v1/users/<u>       → detail + stats + client_info
 PATCH  /v1/users/<u>       → {add_days, bw_down, bw_up, quota_gb, reset_quota, unblock, warp}

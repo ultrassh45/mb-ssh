@@ -151,6 +151,43 @@ s.sendall(b'after-reset')
 print(s.recv(1024).decode())" 2>/dev/null)
 [[ $R == "ECHO:after-reset" ]]; check $? "reset-quota → koneksi kembali"
 
+echo "=== 5b. EXPIRE: masa berlaku habis → block → extend → auto unblock ==="
+# set expire ke masa lalu via ctl (simulasi jatuh tempo)
+python3 - "$T/ctl.sock" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(3)
+s.connect(sys.argv[1])
+s.sendall(b'{"cmd":"setbw","user":"test1","expire_ts":1000000000}\n')
+buf=b""
+while not buf.endswith(b"\n"):
+    d=s.recv(4096)
+    if not d: break
+    buf+=d
+print(buf.decode().strip())
+PY
+sleep 0.3
+R=$(python3 -c "
+import socket
+s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1',$PORT1))
+s.sendall(b'expired-probe')
+try:
+    d = s.recv(1024)
+    print(d.decode())
+except socket.timeout:
+    print('TIMEOUT')
+" 2>/dev/null)
+[[ $R != "ECHO:expired-probe" ]]; check $? "expired user: koneksi baru ditolak (resp=$R)"
+# extend via CLI (jalur panel: PATCH add_days → set --add-days)
+CLI set test1 --add-days 10 >/dev/null 2>&1
+sleep 0.3
+R=$(python3 -c "
+import socket
+s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1',$PORT1))
+s.sendall(b'after-extend')
+print(s.recv(1024).decode())" 2>/dev/null)
+[[ $R == "ECHO:after-extend" ]]; check $? "extend → auto unblock expired, koneksi OK"
+CLI list --json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['test1'].get('blocked') in (None,'')"; check $? "list --json: field blocked live (null setelah unblock)"
+
 echo "=== 6. CLI --json ==="
 CLI list --json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'test1' in d and 'stats' in d['test1']"; check $? "list --json (entry+stats)"
 CLI show test1 --json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['port'] and 'client_info' in d"; check $? "show --json (port+client_info)"

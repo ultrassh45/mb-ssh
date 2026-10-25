@@ -206,8 +206,16 @@ class Edge:
             except asyncio.CancelledError:
                 break
 
-    # ---------- quota ----------
+    # ---------- quota + expire ----------
+    def _check_expire(self, user, u):
+        exp = u.get("expire_ts", 0) or 0
+        if not u.get("blocked") and exp > 0 and time.time() >= exp:
+            u["blocked"] = "expired"
+            LOG(f"EXPIRE {user}: masa berlaku habis — BLOCKED")
+        return u.get("blocked")
+
     def _check_quota(self, user, u):
+        self._check_expire(user, u)
         if not u.get("blocked") and u.get("quota_bytes", 0) > 0 \
                 and self.quota_used(user) >= u["quota_bytes"]:
             u["blocked"] = "quota"
@@ -216,9 +224,9 @@ class Edge:
 
     async def enforce_quota(self):
         for user, u in list(self.users.items()):
-            if u.get("quota_bytes", 0) <= 0:
-                continue
-            if not u.get("blocked") and self.quota_used(user) >= u["quota_bytes"]:
+            self._check_expire(user, u)
+            if u.get("quota_bytes", 0) > 0 \
+                    and not u.get("blocked") and self.quota_used(user) >= u["quota_bytes"]:
                 u["blocked"] = "quota"
                 LOG(f"QUOTA {user}: {self.quota_used(user)} >= {u['quota_bytes']} — BLOCKED")
             if u.get("blocked"):
@@ -327,6 +335,7 @@ class Edge:
             "udpgw": None,
             "conns": set(),
             "quota_bytes": int(float(spec.get("quota_gb", 0)) * GB),
+            "expire_ts": int(spec.get("expire_ts", 0) or 0),
             "blocked": None,
         }
 
@@ -450,6 +459,12 @@ class Edge:
         if spec.get("unblock"):
             u["blocked"] = None
             LOG(f"UNBLOCK {user}")
+        if "expire_ts" in spec:
+            u["expire_ts"] = int(spec["expire_ts"] or 0)
+            # perpanjangan → auto-unblock jika tadinya blocked karena expired
+            if u.get("blocked") == "expired" and (u["expire_ts"] == 0 or u["expire_ts"] > time.time()):
+                u["blocked"] = None
+                LOG(f"UNBLOCK {user}: diperpanjang (expire={u['expire_ts']})")
         LOG(f"SETBW {user}: {u['bw_down']}M/{u['bw_up']}M")
         return "ok"
 
@@ -490,6 +505,7 @@ class Edge:
                 "bw_down_mbps": e.get("bw_down_mbps", 0),
                 "bw_up_mbps": e.get("bw_up_mbps", 0),
                 "quota_gb": e.get("quota_gb", 0),
+                "expire_ts": e.get("expire_ts", 0),
             }
             if e.get("udpgw"):
                 spec["udpgw"] = e["udpgw"]
