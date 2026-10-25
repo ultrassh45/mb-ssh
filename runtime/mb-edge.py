@@ -115,9 +115,38 @@ async def relay(c_reader, c_writer, b_reader, b_writer, b_down, b_up,
                 pass
 
 
+class IpGuard:
+    """Limit koneksi baru per client-IP (brute-force guard)."""
+
+    def __init__(self, max_conn=20, window=60, ban_sec=600):
+        self.max_conn = max_conn
+        self.window = window
+        self.ban_sec = ban_sec
+        self.hits = {}   # ip -> [ts]
+        self.bans = {}   # ip -> until
+
+    def allow(self, ip):
+        now = time.time()
+        ban = self.bans.get(ip)
+        if ban:
+            if now < ban:
+                return False
+            del self.bans[ip]
+        hits = [t for t in self.hits.get(ip, []) if now - t < self.window]
+        if len(hits) >= self.max_conn:
+            self.bans[ip] = now + self.ban_sec
+            LOG(f"GUARD: {ip} BAN {self.ban_sec}s (>={self.max_conn} conn/{self.window}s)")
+            return False
+        hits.append(now)
+        self.hits[ip] = hits
+        return True
+
+
 class Edge:
     def __init__(self):
         self.cfg = {}
+        g = self.cfg.get("guard", {}) if isinstance(self.cfg, dict) else {}
+        self.guard = None  # dibuat di run() setelah load_cfg
         self.common_servers = {}   # port -> (server, backend)
         self.users = {}            # user -> state
         self.stats = {}            # user -> {"in","out","sessions","active"}
@@ -216,6 +245,10 @@ class Edge:
 
         async def handler(rw_reader, rw_writer):
             peer = rw_writer.get_extra_info("peername")
+            if self.guard and not self.guard.allow(peer[0]):
+                LOG(f"REJECT {peer}: guard ban")
+                rw_writer.close()
+                return
             if u is not None:
                 if u.get("blocked"):
                     LOG(f"REJECT {user} {peer}: blocked={u['blocked']}")
@@ -299,6 +332,10 @@ class Edge:
 
         async def handler(r, w, u=u):
             peer = w.get_extra_info("peername")
+            if self.guard and not self.guard.allow(peer[0]):
+                LOG(f"REJECT {user} {peer}: guard ban")
+                w.close()
+                return
             blocked = self._check_quota(user, u)
             if blocked:
                 LOG(f"REJECT {user} {peer}: blocked={blocked}")
@@ -331,6 +368,9 @@ class Edge:
 
             async def ud_handler(r, w, t=target):
                 peer = w.get_extra_info("peername")
+                if self.guard and not self.guard.allow(peer[0]):
+                    w.close()
+                    return
                 if self._check_quota(user, u):
                     w.close()
                     return
@@ -788,6 +828,9 @@ class Edge:
     # ---------- main ----------
     async def run(self):
         self.load_cfg()
+        g = self.cfg.get("guard", {})
+        self.guard = IpGuard(g.get("max_conn", 20), g.get("window", 60),
+                             g.get("ban_sec", 600))
         self.load_stats()
         await self.serve_ctl()
         await self.start_common()

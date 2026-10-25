@@ -44,6 +44,7 @@ fi
 # ---------- 2. SSH stack ----------
 log "Step 2/4: SSH stack (dropbear + stunnel + badvpn + rclone)..."
 bash "$ROOT/install/02-ssh-stack.sh" "$WARP"
+bash "$ROOT/install/03-hardening.sh"
 
 # ---------- 3. Deploy runtime + config + systemd ----------
 log "Step 3/4: Deploy runtime..."
@@ -73,6 +74,17 @@ if not tok or tok == "GANTI_DENGAN_TOKEN_DARI_RUN_SH":
 d["warp"] = (sys.argv[1] == "1")
 json.dump(d, open(p, "w"), indent=2)
 PY
+
+# MOTD global (branding saat login SSH)
+source /etc/mb-ssh2/mb.conf
+cat > /etc/motd <<EOF
++----------------------------------------------------+
+|  $DOMAIN - SSH & WARP Server                       |
+|  Terima kasih sudah berlangganan.                  |
+|  Support : ${SUPPORT:-zxpedia}
++----------------------------------------------------+
+EOF
+log "[ok] /etc/motd (branding)"
 
 for unit in mb-edge dropbear-client; do
   install -m 644 "$ROOT/systemd/$unit.service" "/etc/systemd/system/$unit.service"

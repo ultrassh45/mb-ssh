@@ -34,6 +34,7 @@ STUNNEL_PORT="${STUNNEL_PORT:-22443}"
 WARP_IF="${WARP_IF:-warp}"
 NODE_IP="${NODE_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
 DOMAIN="${DOMAIN:-$NODE_IP}"
+SUPPORT="${SUPPORT:-}"
 
 mkdir -p "$STATE_DIR"
 [[ -f $USERS_JSON ]] || echo '{}' > "$USERS_JSON"
@@ -172,6 +173,50 @@ EOF
 UDPGW: badvpn-udpgw --client --forward 127.0.0.1:53 --to-addr $DOMAIN:$udp
 EOF
   chmod 600 "$STATE_DIR/client-$user.txt"
+  write_motd "$user"
+}
+
+# ---------- server message (MOTD) per-user ----------
+write_motd() {
+  local user="$1"
+  local port pexp bwd bwu qta expstr qstr
+  port=$(jget "$user" "e.get('port','')")
+  pexp=$(jget "$user" "e.get('expire_ts',0)")
+  bwd=$(jget "$user" "e.get('bw_down_mbps',0)")
+  bwu=$(jget "$user" "e.get('bw_up_mbps',0)")
+  qta=$(jget "$user" "e.get('quota_gb',0)")
+  qstr="unlimited"; [[ ${qta:-0} -gt 0 ]] && qstr="${qta}GB"
+  expstr="unlimited"; [[ ${pexp:-0} -gt 0 ]] && expstr=$(date -u -d "@$pexp" '+%F %T UTC')
+  local rc="/home/$user/.bashrc"
+  [[ -d /home/$user ]] || return 0
+  touch "$rc"
+  python3 - "$rc" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+s = re.sub(r"# >>> mb-ssh motd >>>.*?# <<< mb-ssh motd <<<\n?", "", s, flags=re.S)
+open(p, "w").write(s.rstrip() + "\n")
+PY
+  cat >> "$rc" <<EOF
+# >>> mb-ssh motd >>>
+if [[ -z "\${MB_SSH_MOTD:-}" ]]; then
+  MB_SSH_MOTD=1
+  cat <<'MBMOTD'
++----------------------------------------------------+
+|  Terima kasih menggunakan $DOMAIN
++----------------------------------------------------+
+|  Server   : $DOMAIN
+|  Akun     : $user
+|  Expire   : $expstr
+|  SSH Port : $port (via Cloudflare)
+|  Bandwidth: ${bwd}M down / ${bwu}M up
+|  Quota    : $qstr
+|  Support  : ${SUPPORT:-zxpedia}
++----------------------------------------------------+
+MBMOTD
+fi
+# <<< mb-ssh motd <<<
+EOF
 }
 
 # ---------- ops ----------

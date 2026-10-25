@@ -154,6 +154,7 @@ print(s.recv(1024).decode())" 2>/dev/null)
 echo "=== 6. CLI --json ==="
 CLI list --json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'test1' in d and 'stats' in d['test1']"; check $? "list --json (entry+stats)"
 CLI show test1 --json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['port'] and 'client_info' in d"; check $? "show --json (port+client_info)"
+grep -q "mb-ssh motd" /home/test1/.bashrc 2>/dev/null && grep -q "Expire" /home/test1/.bashrc 2>/dev/null; check $? "MOTD per-user di ~/.bashrc"
 
 echo "=== 7. HTTP API ==="
 API=http://127.0.0.1:29499
@@ -190,6 +191,56 @@ C=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H 'Authorization: Bearer t
 C=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer testtok123' $API/v1/users/tuser_api); [[ $C == 404 ]]; check $? "GET setelah delete = 404"
 # 7k. path 404
 C=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer testtok123' $API/v1/nope); [[ $C == 404 ]]; check $? "path tak dikenal = 404"
+
+echo "=== 7b. GUARD (brute force) ==="
+# guard ketat utk test; restart edge (state guard fresh)
+python3 - <<PY
+import json
+p = "$T/conf/edge.json"
+d = json.load(open(p))
+d["guard"] = {"max_conn": 5, "window": 60, "ban_sec": 30}
+json.dump(d, open(p, "w"), indent=2)
+PY
+kill -TERM $EDGE_PID 2>/dev/null; wait $EDGE_PID 2>/dev/null
+sleep 0.5
+start_edge
+# tunggu restore selesai (port user listen)
+for i in $(seq 1 20); do ss -ltn 2>/dev/null | grep -q ":29002 " && break; sleep 0.2; done
+# probe: kirim data; sukses = dapat ECHO dari backend (bukan cuma TCP connect)
+probe() {
+  python3 -c "
+import socket
+try:
+    s = socket.create_connection(('127.0.0.1', 29002), timeout=2)
+    s.sendall(b'PING')
+    s.settimeout(2)
+    r = s.recv(64)
+    s.close()
+    print('OK' if r.startswith(b'ECHO:') else 'FAIL')
+except Exception:
+    print('FAIL')
+"
+}
+suck=0
+for i in $(seq 1 8); do
+  if [[ $(probe) == "OK" ]]; then
+    suck=$((suck+1))
+  else
+    break
+  fi
+  sleep 0.05
+done
+if [[ $suck -eq 5 ]]; then
+  check 0 "GUARD: 5 koneksi OK lalu ditolak (ban aktif, max_conn=5)"
+else
+  check 1 "GUARD: $suck koneksi sebelum ditolak (harusnya 5)"
+fi
+sleep 0.2
+if grep -q "GUARD: .* BAN" $T/edge.log 2>/dev/null; then
+  check 0 "GUARD: log ban tercatat"
+else
+  check 1 "GUARD: log ban tidak ada"
+fi
 
 echo "=== 8. cleanup ==="
 CLI del test1 >/dev/null 2>&1
