@@ -1,35 +1,46 @@
 #!/usr/bin/env python3
-"""mb-edge — edge proxy untuk node SSH (companion Marzban v2)
+"""mb-edge v3 — edge proxy untuk node SSH (companion Marzban)
 
 Listen di pool port (CF-allowed) -> relay TCP ke backend:
-  - dropbear  (SSH Direct)
-  - stunnel   (SSH TLS)
-  - udpgw     (port local per-user badvpn-udpgw)
+  - dropbear  (SSH Direct)  127.0.0.1:22022
+  - stunnel   (SSH TLS)     127.0.0.1:22443
+  - udpgw     (per-user badvpn-udpgw, port lokal)
 
 Fitur:
-  - common ports  : shared relay ke backend default (tanpa per-user BW)
-  - user ports    : hot add/remove via control socket, per-user token bucket
-                    (bw_down/bw_up bytes/sec), per-user udpgw relay
-  - hot reload    : tanpa restart, koneksi existing tidak putus
+  - common ports : shared relay (tanpa per-user limit)
+  - user ports   : hot add/remove via control socket, token-bucket per-user
+  - RESTORE      : edge start -> auto-load users.json (port + udpgw respawn)
+  - STATS        : bytes in/out, sessions, active — persist ke stats.json
+  - QUOTA        : quota_gb per-user (0=unlimited), auto-block saat exceeded
+  - WARP MON     : cek `warp-cli --status` tiap 60s, auto `warp-cli connect`
+  - HTTP API     : /v1/health|users (direct IP, Bearer token + IP allowlist
+                   + rate limit), shell-out ke mb-ssh2 CLI
 
-Config : /etc/mb-ssh/edge.json
+Config : /etc/mb-ssh2/edge.json
 Control: unix socket /run/mb-ssh/edge.sock  (JSON line)
-  {"cmd":"add",   "user":"vpn_x", "port":2082, "backend":"127.0.0.1:22022",
-   "bw_down_mbps":100, "bw_up_mbps":50, "udpgw": {"port":2052, "target":"127.0.0.1:17001"}}
-  {"cmd":"remove","user":"vpn_x"}
-  {"cmd":"setbw", "user":"vpn_x", "bw_down_mbps":50}
-  {"cmd":"list"}
 """
 import asyncio
+import hmac
 import json
 import os
+import re
+import shutil
 import signal
 import socket
+import subprocess
 import sys
 import time
 
-CFG_PATH = os.environ.get("MB_EDGE_CFG", "/etc/mb-ssh/edge.json")
+CFG_PATH = os.environ.get("MB_EDGE_CFG", "/etc/mb-ssh2/edge.json")
 CTL_PATH = os.environ.get("MB_EDGE_CTL", "/run/mb-ssh/edge.sock")
+STATE_FILE = os.environ.get("MB_EDGE_STATE", "/var/lib/mb-ssh/users.json")
+STATS_FILE = os.environ.get("MB_EDGE_STATS", "/var/lib/mb-ssh/stats.json")
+SSH2_BIN = os.environ.get("MB_SSH2_BIN", "/usr/local/bin/mb-ssh2")
+API_LOG = os.environ.get("MB_EDGE_API_LOG", "/var/log/mb-api.log")
+BADVPN_BIN = os.environ.get("MB_BADVPN_BIN", "/usr/local/bin/badvpn-udpgw")
+VERSION = "mb-edge 3.0.0"
+GB = 1024 ** 3
+
 LOG = lambda m: print(f"[mb-edge {time.strftime('%F %T')}] {m}", flush=True)
 
 
@@ -61,36 +72,42 @@ class Bucket:
             await asyncio.sleep(max(0.002, min(wait, 0.5)))
 
 
-async def pump(src, dst, bucket):
+async def pump(src, dst, bucket, stat=None, key=None):
     try:
         while True:
             data = await src.read(65536)
             if not data:
                 break
+            if stat is not None and key:
+                stat[key] += len(data)
             await bucket.take(len(data))
             dst.write(data)
             await dst.drain()
     except (ConnectionError, asyncio.IncompleteReadError, OSError):
         pass
     finally:
-        for w in (dst,):
-            try:
-                w.close()
-            except OSError:
-                pass
+        try:
+            dst.close()
+        except OSError:
+            pass
         try:
             await dst.wait_closed()
         except OSError:
             pass
 
 
-async def relay(c_reader, c_writer, b_reader, b_writer, b_down, b_up):
+async def relay(c_reader, c_writer, b_reader, b_writer, b_down, b_up,
+                stat=None, conns=None):
     try:
+        if conns is not None:
+            conns.add(c_writer)
         await asyncio.gather(
-            pump(c_reader, b_writer, b_down),
-            pump(b_reader, c_writer, b_up),
+            pump(c_reader, b_writer, b_down, stat, "in"),
+            pump(b_reader, c_writer, b_up, stat, "out"),
         )
     finally:
+        if conns is not None:
+            conns.discard(c_writer)
         for w in (c_writer, b_writer):
             try:
                 w.close()
@@ -102,19 +119,87 @@ class Edge:
     def __init__(self):
         self.cfg = {}
         self.common_servers = {}   # port -> (server, backend)
-        self.users = {}            # user -> {port, backend, b_down, b_up, server, udpgw:{port,target,server}}
+        self.users = {}            # user -> state
+        self.stats = {}            # user -> {"in","out","sessions","active"}
         self.ctl_server = None
-        self.loop = None
+        self.api_server = None
+        self.warp_status = "off"
+        self.started = time.time()
+        self._api_hits = {}        # ip -> [timestamps]
+        self._stopping = False
 
     def load_cfg(self):
         try:
             with open(CFG_PATH) as f:
                 self.cfg = json.load(f)
         except FileNotFoundError:
-            LOG(f"config {CFG_PATH} tidak ada — common ports kosong")
+            LOG(f"config {CFG_PATH} tidak ada")
             self.cfg = {"common_ports": [], "common_backend": ""}
 
-    # ---- common ports ----
+    def backend_addr(self, name_or_addr):
+        if ":" in name_or_addr:
+            return name_or_addr
+        return self.cfg.get("backends", {}).get(
+            name_or_addr, self.cfg.get("common_backend", "127.0.0.1:22022"))
+
+    # ---------- stats ----------
+    def stat(self, user):
+        return self.stats.setdefault(user, {"in": 0, "out": 0, "sessions": 0, "active": 0})
+
+    def quota_used(self, user):
+        s = self.stat(user)
+        return s["in"] + s["out"]
+
+    def flush_stats(self):
+        try:
+            os.makedirs(os.path.dirname(STATS_FILE), exist_ok=True)
+            with open(STATS_FILE, "w") as f:
+                json.dump(self.stats, f, indent=1)
+        except OSError as e:
+            LOG(f"flush stats gagal: {e}")
+
+    def load_stats(self):
+        try:
+            with open(STATS_FILE) as f:
+                self.stats = json.load(f)
+            for s in self.stats.values():
+                s["active"] = 0
+            LOG(f"stats dipulihkan: {len(self.stats)} user")
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.stats = {}
+
+    async def stats_loop(self):
+        while not self._stopping:
+            try:
+                await asyncio.sleep(60)
+                self.flush_stats()
+                await self.enforce_quota()
+            except asyncio.CancelledError:
+                break
+
+    # ---------- quota ----------
+    def _check_quota(self, user, u):
+        if not u.get("blocked") and u.get("quota_bytes", 0) > 0 \
+                and self.quota_used(user) >= u["quota_bytes"]:
+            u["blocked"] = "quota"
+            LOG(f"QUOTA {user}: {self.quota_used(user)} >= {u['quota_bytes']} — BLOCKED")
+        return u.get("blocked")
+
+    async def enforce_quota(self):
+        for user, u in list(self.users.items()):
+            if u.get("quota_bytes", 0) <= 0:
+                continue
+            if not u.get("blocked") and self.quota_used(user) >= u["quota_bytes"]:
+                u["blocked"] = "quota"
+                LOG(f"QUOTA {user}: {self.quota_used(user)} >= {u['quota_bytes']} — BLOCKED")
+            if u.get("blocked"):
+                for w in list(u.get("conns", set())):
+                    try:
+                        w.close()
+                    except OSError:
+                        pass
+
+    # ---------- common ports ----------
     async def start_common(self):
         backend = self.cfg.get("common_backend", "")
         for p in self.cfg.get("common_ports", []):
@@ -125,12 +210,21 @@ class Edge:
             if server:
                 self.common_servers[p] = (server, backend)
 
-    async def _listen(self, port, backend, shared=False, user=None):
+    async def _listen(self, port, backend, shared=False, user=None, u=None):
         b_down = Bucket(0)
         b_up = Bucket(0)
 
         async def handler(rw_reader, rw_writer):
             peer = rw_writer.get_extra_info("peername")
+            if u is not None:
+                if u.get("blocked"):
+                    LOG(f"REJECT {user} {peer}: blocked={u['blocked']}")
+                    rw_writer.close()
+                    return
+                st = self.stat(user)
+                st["sessions"] += 1
+                st["active"] += 1
+                u["conns"].add(rw_writer)
             try:
                 ur, uw = await asyncio.open_connection(*backend.split(":"))
             except OSError as e:
@@ -138,7 +232,14 @@ class Edge:
                 rw_writer.close()
                 return
             LOG(f"conn {peer} -> {backend}" + (f" (user={user})" if user else " (shared)"))
-            await relay(rw_reader, rw_writer, ur, uw, b_down, b_up)
+            await relay(rw_reader, rw_writer, ur, uw,
+                        u["b_down"] if u else b_down,
+                        u["b_up"] if u else b_up,
+                        stat=self.stat(user) if user else None,
+                        conns=u["conns"] if u else None)
+            if u is not None:
+                st["active"] -= 1
+                u["conns"].discard(rw_writer)
 
         try:
             server = await asyncio.start_server(handler, "0.0.0.0", port)
@@ -147,11 +248,41 @@ class Edge:
             return None
         return server
 
-    # ---- per-user ----
+    # ---------- udpgw ----------
+    async def ensure_udpgw(self, user, localport):
+        """Pastikan badvpn-udpgw listening di 127.0.0.1:<lp> (restore/restart)."""
+        try:
+            r, w = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", int(localport)), timeout=1.0)
+            w.close()
+            return True
+        except OSError:
+            pass
+        if not os.path.isfile(BADVPN_BIN):
+            LOG(f"udpgw {user}: binary {BADVPN_BIN} tidak ada — skip")
+            return False
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                BADVPN_BIN, "--listen-addr", f"127.0.0.1:{localport}",
+                "--max-clients", "32", "--max-packets-per-connection", "8",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True)
+            await asyncio.sleep(0.4)
+            ok = proc.returncode is None
+            if ok:
+                LOG(f"udpgw {user} di-spawn ulang :{localport}")
+            else:
+                LOG(f"udpgw {user} gagal spawn :{localport}")
+            return ok
+        except OSError as e:
+            LOG(f"udpgw {user} spawn error: {e}")
+            return False
+
+    # ---------- per-user ----------
     async def add_user(self, spec):
         user = spec["user"]
         port = int(spec["port"])
-        backend = spec.get("backend", "127.0.0.1:22022")
+        backend = self.backend_addr(spec.get("backend", "127.0.0.1:22022"))
         u = {
             "port": port,
             "backend": backend,
@@ -161,10 +292,22 @@ class Edge:
             "bw_up": spec.get("bw_up_mbps", 0),
             "server": None,
             "udpgw": None,
+            "conns": set(),
+            "quota_bytes": int(float(spec.get("quota_gb", 0)) * GB),
+            "blocked": None,
         }
 
         async def handler(r, w, u=u):
             peer = w.get_extra_info("peername")
+            blocked = self._check_quota(user, u)
+            if blocked:
+                LOG(f"REJECT {user} {peer}: blocked={blocked}")
+                w.close()
+                return
+            st = self.stat(user)
+            st["sessions"] += 1
+            st["active"] += 1
+            u["conns"].add(w)
             try:
                 ur, uw = await asyncio.open_connection(*u["backend"].split(":"))
             except OSError as e:
@@ -172,19 +315,29 @@ class Edge:
                 w.close()
                 return
             LOG(f"user {user} conn {peer} -> {u['backend']}")
-            await relay(r, w, ur, uw, u["b_down"], u["b_up"])
+            await relay(r, w, ur, uw, u["b_down"], u["b_up"],
+                        stat=st, conns=u["conns"])
+            st["active"] -= 1
+            u["conns"].discard(w)
 
         u["server"] = await self._raw_listen(port, handler)
         if u["server"] is None:
             return f"fail: port {port} busy/unavailable"
 
-        # udpgw relay (opsional)
         ud = spec.get("udpgw")
         if ud and ud.get("port"):
             target = ud.get("target", "127.0.0.1:17001")
+            await self.ensure_udpgw(user, target.split(":")[-1])
 
             async def ud_handler(r, w, t=target):
                 peer = w.get_extra_info("peername")
+                if self._check_quota(user, u):
+                    w.close()
+                    return
+                st = self.stat(user)
+                st["sessions"] += 1
+                st["active"] += 1
+                u["conns"].add(w)
                 try:
                     ur, uw = await asyncio.open_connection(*t.split(":"))
                 except OSError as e:
@@ -192,7 +345,10 @@ class Edge:
                     w.close()
                     return
                 LOG(f"user {user} udpgw conn {peer} -> {t}")
-                await relay(r, w, ur, uw, u["b_down"], u["b_up"])
+                await relay(r, w, ur, uw, u["b_down"], u["b_up"],
+                            stat=st, conns=u["conns"])
+                st["active"] -= 1
+                u["conns"].discard(w)
 
             u["udpgw"] = {"port": int(ud["port"]), "target": target,
                           "server": await self._raw_listen(int(ud["port"]), ud_handler)}
@@ -201,8 +357,9 @@ class Edge:
 
         self.users[user] = u
         LOG(f"ADD {user}: ssh :{port} -> {backend} "
-            f"bw {u['bw_down']}M/{u['bw_up']}M"
-            + (f" udpgw :{ud['port']} -> {ud.get('target')}" if u['udpgw'] else ""))
+            f"bw {u['bw_down']}M/{u['bw_up']}M "
+            f"quota {spec.get('quota_gb', 0)}GB"
+            + (f" udpgw :{ud['port']} -> {ud.get('target')}" if u["udpgw"] else ""))
         return "ok"
 
     async def _raw_listen(self, port, handler):
@@ -216,10 +373,17 @@ class Edge:
         u = self.users.pop(user, None)
         if not u:
             return "not_found"
+        for w in list(u.get("conns", set())):
+            try:
+                w.close()
+            except OSError:
+                pass
         for s in (u["server"], u["udpgw"]["server"] if u["udpgw"] else None):
             if s:
                 s.close()
                 await s.wait_closed()
+        self.stats.pop(user, None)
+        self.flush_stats()
         LOG(f"REMOVE {user}")
         return "ok"
 
@@ -233,22 +397,103 @@ class Edge:
         if "bw_up_mbps" in spec:
             u["b_up"].set_rate(spec["bw_up_mbps"] * 125_000)
             u["bw_up"] = spec["bw_up_mbps"]
+        if "quota_gb" in spec:
+            u["quota_bytes"] = int(float(spec["quota_gb"]) * GB)
+            LOG(f"SETQUOTA {user}: {spec['quota_gb']}GB")
+        if spec.get("reset_quota"):
+            s = self.stat(user)
+            s["in"] = 0
+            s["out"] = 0
+            u["blocked"] = None
+            self.flush_stats()
+            LOG(f"RESETQUOTA {user}")
+        if spec.get("unblock"):
+            u["blocked"] = None
+            LOG(f"UNBLOCK {user}")
         LOG(f"SETBW {user}: {u['bw_down']}M/{u['bw_up']}M")
         return "ok"
 
     def list_state(self):
         out = {"common": {str(p): b for p, (s, b) in self.common_servers.items()},
-               "users": {}}
+               "users": {}, "warp": self.warp_status}
         for user, u in self.users.items():
+            s = self.stat(user)
             out["users"][user] = {
                 "port": u["port"], "backend": u["backend"],
                 "bw_down_mbps": u["bw_down"], "bw_up_mbps": u["bw_up"],
                 "udpgw": ({"port": u["udpgw"]["port"], "target": u["udpgw"]["target"]}
                           if u["udpgw"] and u["udpgw"]["server"] else None),
+                "quota_bytes": u["quota_bytes"],
+                "quota_used": self.quota_used(user),
+                "blocked": u["blocked"],
+                "stats": s,
             }
         return json.dumps(out)
 
-    # ---- control socket ----
+    # ---------- RESTORE (P0) ----------
+    async def restore(self):
+        try:
+            with open(STATE_FILE) as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            LOG(f"restore: state {STATE_FILE} kosong/tidak ada")
+            return 0
+        n = 0
+        for user, e in data.items():
+            port = e.get("port")
+            if not port:
+                continue
+            spec = {
+                "user": user,
+                "port": port,
+                "backend": e.get("backend", "direct"),
+                "bw_down_mbps": e.get("bw_down_mbps", 0),
+                "bw_up_mbps": e.get("bw_up_mbps", 0),
+                "quota_gb": e.get("quota_gb", 0),
+            }
+            if e.get("udpgw"):
+                spec["udpgw"] = e["udpgw"]
+            resp = await self.add_user(spec)
+            if resp == "ok":
+                n += 1
+            else:
+                LOG(f"restore {user} gagal: {resp}")
+        LOG(f"RESTORE: {n} user port aktif")
+        return n
+
+    # ---------- WARP monitor ----------
+    async def warp_loop(self):
+        if not self.cfg.get("warp"):
+            return
+        self.warp_status = "up"
+        while not self._stopping:
+            try:
+                st = await asyncio.create_subprocess_exec(
+                    "warp-cli", "--status",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                out, _ = await asyncio.wait_for(st.communicate(), timeout=10)
+                connected = b"Connected" in out
+                if not connected and self.warp_status == "up":
+                    LOG("WARP down — mencoba connect ulang...")
+                    await asyncio.create_subprocess_exec(
+                        "warp-cli", "connect",
+                        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                        start_new_session=True)
+                    await asyncio.sleep(5)
+                    st2 = await asyncio.create_subprocess_exec(
+                        "warp-cli", "--status",
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                    out2, _ = await asyncio.wait_for(st2.communicate(), timeout=10)
+                    connected = b"Connected" in out2
+                self.warp_status = "up" if connected else "down"
+                if not connected:
+                    LOG(f"WARP masih down")
+            except (OSError, asyncio.TimeoutError) as e:
+                self.warp_status = "error"
+                LOG(f"warp check error: {e}")
+            await asyncio.sleep(60)
+
+    # ---------- control socket ----------
     async def ctl_handler(self, reader, writer):
         try:
             while True:
@@ -269,6 +514,9 @@ class Edge:
                         resp = await self.set_bw(spec.get("user", ""), spec)
                     elif cmd == "list":
                         resp = self.list_state()
+                    elif cmd == "flush":
+                        self.flush_stats()
+                        resp = "ok"
                     else:
                         resp = f"error: unknown cmd {cmd}"
                 writer.write((resp + "\n").encode())
@@ -289,13 +537,273 @@ class Edge:
         usock.setblocking(False)
         self.ctl_server = await asyncio.start_server(self.ctl_handler, sock=usock)
 
+    # ---------- HTTP API ----------
+    def api_cfg(self):
+        return self.cfg.get("api", {})
+
+    def _api_log(self, ip, method, path, status):
+        try:
+            with open(API_LOG, "a") as f:
+                f.write(f"{time.strftime('%F %T')} {ip} {method} {path} {status}\n")
+        except OSError:
+            pass
+
+    def _api_auth(self, headers, peer_ip):
+        a = self.api_cfg()
+        token = a.get("token", "")
+        if not token:
+            return "error: api token tidak di-set (edge.json api.token)"
+        hauth = headers.get("authorization", "")
+        if not hauth.startswith("Bearer "):
+            return None
+        if not hmac.compare_digest(hauth[7:].strip(), token):
+            return None
+        allow = a.get("allow_ip", [])
+        if allow and peer_ip not in allow:
+            return "ip_not_allowed"
+        return "ok"
+
+    def _api_rate(self, ip):
+        now = time.time()
+        hits = [t for t in self._api_hits.get(ip, []) if now - t < 60]
+        if len(hits) >= 30:
+            return False
+        hits.append(now)
+        self._api_hits[ip] = hits
+        return True
+
+    async def _cli(self, *args, timeout=15):
+        try:
+            p = await asyncio.create_subprocess_exec(
+                SSH2_BIN, *args,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            out, err = await asyncio.wait_for(p.communicate(), timeout=timeout)
+            return p.returncode, out.decode().strip(), err.decode().strip()
+        except (OSError, asyncio.TimeoutError) as e:
+            return 1, "", f"cli error: {e}"
+
+    @staticmethod
+    def _json_resp(reason, obj):
+        body = json.dumps(obj).encode()
+        return (f"HTTP/1.1 {reason}\r\n"
+                f"Content-Type: application/json\r\n"
+                f"Content-Length: {len(body)}\r\n"
+                f"Connection: close\r\n\r\n").encode() + body
+
+    USER_RE = re.compile(r"^[a-z0-9_]{3,32}$")
+
+    async def _send(self, writer, resp):
+        writer.write(resp)
+        await writer.drain()
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
+
+    async def api_handler(self, reader, writer):
+        ip = writer.get_extra_info("peername")
+        ip = ip[0] if ip else "?"
+        try:
+            raw = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10)
+        except (asyncio.LimitOverrunError, asyncio.TimeoutError, OSError):
+            writer.close()
+            return
+        try:
+            head = raw.decode("latin1")
+            lines = head.split("\r\n")
+            method, path, _ = lines[0].split(" ")
+            headers = {}
+            for ln in lines[1:]:
+                if ":" in ln:
+                    k, v = ln.split(":", 1)
+                    headers[k.strip().lower()] = v.strip()
+            cl = int(headers.get("content-length", 0) or 0)
+            body = b""
+            if cl:
+                body = await asyncio.wait_for(reader.readexactly(cl), timeout=10)
+        except (ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError):
+            self._api_log(ip, "?", "?", 400)
+            await self._send(writer, self._json_resp("400 Bad Request", {"error": "bad request"}))
+            return
+
+        self._api_log(ip, method, path, 0)
+        if not self._api_rate(ip):
+            resp = self._json_resp("429 Too Many Requests", {"error": "rate limit"})
+            self._api_log(ip, method, path, 429)
+            await self._send(writer, resp)
+            return
+
+        auth = self._api_auth(headers, peer_ip=ip)
+        if auth != "ok":
+            if auth == "ip_not_allowed":
+                code, msg, why = 403, "Forbidden", {"error": "ip not allowed"}
+            elif isinstance(auth, str) and auth.startswith("error:"):
+                code, msg, why = 500, "Server Error", {"error": auth}
+            else:
+                code, msg, why = 401, "Unauthorized", {"error": "bad token"}
+            self._api_log(ip, method, path, code)
+            await self._send(writer, self._json_resp(f"{code} {msg}", why))
+            return
+
+        # ---------- routing ----------
+        status, payload = await self._api_route(method, path, body)
+        self._api_log(ip, method, path, status)
+        await self._send(writer, self._json_resp(
+            f"{status} OK" if 200 <= status < 300 else f"{status} Error", payload))
+
+    async def _api_route(self, method, path, body):
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            return 400, {"error": "bad json body"}
+
+        if path == "/v1/health" and method == "GET":
+            return await self._health()
+        if path == "/v1/users" and method == "GET":
+            return await self._users_list()
+        if path == "/v1/users" and method == "POST":
+            return await self._user_create(data)
+        m = re.fullmatch(r"/v1/users/([a-z0-9_]{3,32})", path)
+        if m:
+            user = m.group(1)
+            if method == "GET":
+                return await self._user_show(user)
+            if method == "PATCH":
+                return await self._user_patch(user, data)
+            if method == "DELETE":
+                return await self._user_delete(user)
+        return 404, {"error": "not found"}
+
+    async def _health(self):
+        du = shutil.disk_usage("/")
+        total_active = sum(s["active"] for s in self.stats.values())
+        return 200, {
+            "status": "ok", "version": VERSION,
+            "uptime_s": int(time.time() - self.started),
+            "users": len(self.users), "active_sessions": total_active,
+            "common_ports": sorted(self.common_servers.keys()),
+            "warp": self.warp_status,
+            "disk_pct": round(100 * du.used / du.total),
+        }
+
+    async def _users_list(self):
+        rc, out, err = await self._cli("list", "--json")
+        if rc != 0:
+            return 500, {"error": err or out}
+        try:
+            return 200, json.loads(out)
+        except json.JSONDecodeError:
+            return 500, {"error": "cli output bukan json"}
+
+    async def _user_create(self, d):
+        user = str(d.get("username", "")).lower()
+        if not self.USER_RE.match(user):
+            return 400, {"error": "username harus 3-32 char [a-z0-9_]"}
+        days = d.get("days", 30)
+        bw_down, bw_up = d.get("bw_down", 100), d.get("bw_up", 50)
+        quota = d.get("quota_gb", 0)
+        backend = d.get("backend", "direct")
+        if not (isinstance(days, int) and 0 <= days <= 3650):
+            return 400, {"error": "days harus int 0-3650"}
+        if not (isinstance(bw_down, int) and 0 <= bw_down <= 1000):
+            return 400, {"error": "bw_down harus int 0-1000"}
+        if not (isinstance(bw_up, int) and 0 <= bw_up <= 1000):
+            return 400, {"error": "bw_up harus int 0-1000"}
+        if not (isinstance(quota, (int, float)) and 0 <= quota <= 10000):
+            return 400, {"error": "quota_gb harus int 0-10000"}
+        if backend not in ("direct", "tls"):
+            return 400, {"error": "backend harus direct|tls"}
+        args = ["add", user, str(days), "--bw", f"{bw_down}/{bw_up}",
+                "--backend", backend]
+        if d.get("udp"):
+            args.append("--udp")
+        if d.get("warp"):
+            args.append("--warp")
+        if quota:
+            args += ["--quota", str(quota)]
+        rc, out, err = await self._cli(*args, timeout=30)
+        if rc != 0:
+            code = 409 if ("sudah ada" in err or "sudah ada" in out) else 400
+            return code, {"error": err or out}
+        return 201, {"user": user, "created": True, "info": out}
+
+    async def _user_show(self, user):
+        rc, out, err = await self._cli("show", user, "--json")
+        if rc != 0:
+            return 404, {"error": err or out}
+        try:
+            return 200, json.loads(out)
+        except json.JSONDecodeError:
+            return 500, {"error": "cli output bukan json"}
+
+    async def _user_patch(self, user, d):
+        args = ["set", user]
+        if "add_days" in d:
+            ad = d["add_days"]
+            if not (isinstance(ad, int) and 1 <= ad <= 3650):
+                return 400, {"error": "add_days harus int 1-3650"}
+            args += ["--add-days", str(ad)]
+        if "bw_down" in d or "bw_up" in d:
+            cur = self.users.get(user, {})
+            bd = d.get("bw_down", cur.get("bw_down", 100))
+            bu = d.get("bw_up", cur.get("bw_up", 50))
+            if not (0 <= bd <= 1000 and 0 <= bu <= 1000):
+                return 400, {"error": "bw harus 0-1000"}
+            args += ["--bw", f"{bd}/{bu}"]
+        if "quota_gb" in d:
+            q = d["quota_gb"]
+            if not (isinstance(q, (int, float)) and 0 <= q <= 10000):
+                return 400, {"error": "quota_gb harus int 0-10000"}
+            args += ["--quota", str(q)]
+        if d.get("reset_quota"):
+            args.append("--reset-quota")
+        if d.get("unblock"):
+            args.append("--unblock")
+        if d.get("warp") is not None:
+            args.append("--warp" if d["warp"] else "--no-warp")
+        if len(args) == 2:
+            return 400, {"error": "body kosong (add_days/bw_down/bw_up/quota_gb/...)"}
+        rc, out, err = await self._cli(*args, timeout=30)
+        if rc != 0:
+            return 404 if "tidak ada" in (err or "") else 400, {"error": err or out}
+        return 200, {"user": user, "updated": True, "info": out}
+
+    async def _user_delete(self, user):
+        rc, out, err = await self._cli("del", user, timeout=30)
+        if rc != 0:
+            return 404, {"error": err or out}
+        return 200, {"user": user, "deleted": True}
+
+    async def serve_api(self):
+        a = self.api_cfg()
+        port = int(a.get("port", 8499))
+        try:
+            self.api_server = await asyncio.start_server(self.api_handler, "0.0.0.0", port)
+            LOG(f"HTTP API up :{port}"
+                + (f" allow_ip={a.get('allow_ip')}" if a.get("allow_ip") else ""))
+        except OSError as e:
+            LOG(f"FAIL API listen :{port}: {e}")
+
+    # ---------- main ----------
     async def run(self):
-        self.loop = asyncio.get_running_loop()
         self.load_cfg()
+        self.load_stats()
         await self.serve_ctl()
         await self.start_common()
-        LOG(f"edge up. control={CTL_PATH} cfg={CFG_PATH}")
-        await self.ctl_server.serve_forever()
+        await self.restore()
+        await self.serve_api()
+        LOG(f"edge up. control={CTL_PATH} cfg={CFG_PATH} ver={VERSION}")
+        tasks = [asyncio.create_task(self.stats_loop()),
+                 asyncio.create_task(self.warp_loop())]
+        try:
+            await self.ctl_server.serve_forever()
+        finally:
+            self._stopping = True
+            for t in tasks:
+                t.cancel()
+            self.flush_stats()
+            LOG("edge stopped (stats di-flush)")
 
 
 def main():

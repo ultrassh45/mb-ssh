@@ -11,7 +11,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 log "install dropbear + stunnel4..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq dropbear stunnel4 >/dev/null
+apt-get install -y -qq dropbear stunnel4 rclone >/dev/null
 
 # ---------- badvpn ----------
 log "badvpn-udpgw (prebuilt)..."

@@ -3,11 +3,12 @@
 # Per-user: akun SSH (dropbear) + port CF dedicated + bandwidth limit +
 #           udpgw opsional + WARP opsional
 #
-#   mb-ssh2 add <user> [days] [--udp] [--bw DOWN/UP] [--backend direct|tls] [--warp]
+#   mb-ssh2 add <user> [days] [--udp] [--bw D/U] [--backend direct|tls] [--warp] [--quota GB]
 #   mb-ssh2 del <user>
-#   mb-ssh2 set <user> [days] [--bw DOWN/UP] [--port P]
-#   mb-ssh2 list
-#   mb-ssh2 show <user>
+#   mb-ssh2 set <user> [days] [--bw D/U] [--add-days N] [--quota GB] [--unblock] [--reset-quota] [--warp|--no-warp]
+#   mb-ssh2 list [--json]
+#   mb-ssh2 show <user> [--json]
+#   mb-ssh2 backup / restore   (rclone ke R2: R2_REMOTE + R2_PATH di mb.conf)
 #   mb-ssh2 edge-list / edge-add / edge-remove  (raw edge control)
 #
 # Config: /etc/mb-ssh2/edge.json + /etc/mb-ssh2/mb.conf
@@ -15,7 +16,7 @@
 
 set -u
 
-CONF_DIR=/etc/mb-ssh2
+CONF_DIR="${CONF_DIR:-/etc/mb-ssh2}"
 CONF="$CONF_DIR/mb.conf"
 [[ -f $CONF ]] && source "$CONF"
 
@@ -23,6 +24,9 @@ EDGE_CFG="${EDGE_CFG:-$CONF_DIR/edge.json}"
 EDGE_CTL="${EDGE_CTL:-/run/mb-ssh/edge.sock}"
 STATE_DIR="${STATE_DIR:-/var/lib/mb-ssh}"
 USERS_JSON="$STATE_DIR/users.json"
+STATS_JSON="$STATE_DIR/stats.json"
+R2_REMOTE="${R2_REMOTE:-}"
+R2_PATH="${R2_PATH:-mb-ssh/$(hostname)}"
 BADVPN_BIN="${BADVPN_BIN:-/usr/local/bin/badvpn-udpgw}"
 BADVPN_PORT_BASE="${BADVPN_PORT_BASE:-17000}"
 DROPBEAR_PORT="${DROPBEAR_PORT:-22022}"
@@ -142,6 +146,8 @@ write_client_info() {
   bwu=$(jget "$user" "e.get('bw_up_mbps',0)")
   udp=$(jget "$user" "e.get('udpgw',{}).get('port','')")
   wpt=$(jget "$user" "e.get('udpgw',{}).get('warp_port','')")
+  qta=$(jget "$user" "e.get('quota_gb',0)")
+  local qstr="unlimited"; [[ ${qta:-0} -gt 0 ]] && qstr="${qta}GB (lifetime)"
   local expstr="unlimited"; [[ ${pexp:-0} -gt 0 ]] && expstr=$(date -u -d "@$pexp" '+%F %T UTC')
   cat > "$STATE_DIR/client-$user.txt" <<EOF
 Node        : $DOMAIN
@@ -150,6 +156,7 @@ Password    : $pass
 Expire      : $expstr
 SSH Port    : $port      (dedicated, via Cloudflare)
 Bandwidth   : ${bwd}M down / ${bwu}M up
+Quota       : $qstr
 EOF
   [[ -n $udp ]] && cat >> "$STATE_DIR/client-$user.txt" <<EOF
 UDPGW Port  : $udp      (dedicated, via Cloudflare)
@@ -169,13 +176,14 @@ EOF
 
 # ---------- ops ----------
 do_add() {
-  local user="$1" days="${2:-30}" udp=0 bwd=100 bwu=50 backend=direct warp=0
+  local user="$1" days="${2:-30}" udp=0 bwd=100 bwu=50 backend=direct warp=0 quota=0
   shift $(( $# >= 2 ? 2 : $# )) || true
   # parse flags (sisa arg)
   while [[ $# -gt 0 ]]; do case "$1" in
     --udp) udp=1;; --warp) warp=1;;
     --bw) local bw="${2:?--bw DOWN/UP}"; IFS=/ read -r bwd bwu <<< "$bw"; shift;;
     --backend) backend="${2:?}"; shift;;
+    --quota) quota="${2:?--quota GB}"; shift;;
   esac; shift; done
 
   id -u "$user" &>/dev/null && die "$user sudah ada"
@@ -200,7 +208,7 @@ do_add() {
     if ! spawn_udpgw "$user" "$lp"; then udp=0; fi
     [[ $udp -eq 1 ]] && spec="$spec,\"udpgw\":{\"port\":$udpport,\"target\":\"127.0.0.1:$lp\"}"
   fi
-  spec="$spec}"
+  spec="$spec,\"quota_gb\":$quota}"
 
   edge_alive || die "mb-edge tidak jalan (systemctl start mb-edge)"
   local resp; resp=$(edge_ctl "$spec")
@@ -212,8 +220,8 @@ do_add() {
   [[ $warp -eq 1 ]] && warp_rule_add "$user" || true
 
   local udp_json=""
-  [[ $udp -eq 1 ]] && udp_json=",\"udpgw\":{\"port\":$udpport,\"target\":\"127.0.0.1:$lp\"}"
-  jset "$user" "{\"pass\":\"$pass\",\"port\":$port,\"backend\":\"$backend\",\"expire_ts\":$pexp,\"days\":$days,\"bw_down_mbps\":$bwd,\"bw_up_mbps\":$bwu,\"created\":$now,\"warp\":$warp$udp_json}"
+  [[ $udp -eq 1 ]] && udp_json=\",\"udpgw\":{\"port\":$udpport,\"target\":\"127.0.0.1:$lp\"}\"
+  jset "$user" "{\"pass\":\"$pass\",\"port\":$port,\"backend\":\"$backend\",\"expire_ts\":$pexp,\"days\":$days,\"bw_down_mbps\":$bwd,\"bw_up_mbps\":$bwu,\"created\":$now,\"warp\":$warp,\"quota_gb\":$quota$udp_json}"
   write_client_info "$user"
   local extra=""
   [[ $udp -eq 1 ]] && extra="udp:$udpport"
@@ -240,10 +248,16 @@ do_del() {
 
 do_set() {
   local user="$1"; shift || true
-  local days="" bw="" port=""
+  local days="" bw="" port="" adays="" quota="" unblock=0 rquota=0 warpflag=""
   while [[ $# -gt 0 ]]; do case "$1" in
     --bw) bw="${2:?}"; shift;;
     --port) port="${2:?}"; shift;;
+    --add-days) adays="${2:?}"; shift;;
+    --quota) quota="${2:?}"; shift;;
+    --unblock) unblock=1;;
+    --reset-quota) rquota=1;;
+    --warp) warpflag=1;;
+    --no-warp) warpflag=0;;
     *) days="$1";;
   esac; shift; done
   id -u "$user" &>/dev/null || die "$user tidak ada"
@@ -251,7 +265,6 @@ do_set() {
   if [[ -n $days ]]; then
     local pexp; [[ $days -gt 0 ]] && pexp=$((now + days*86400)) || pexp=0
     [[ $pexp -gt 0 ]] && usermod -e "$(date -u -d "@$pexp" '+%Y-%m-%d')" "$user" || usermod -e "" "$user"
-    jget "$user" "e.update({'expire_ts':$pexp,'days':$days})" >/dev/null
     python3 -c "
 import json
 d=json.load(open('$USERS_JSON'))
@@ -259,9 +272,22 @@ d['$user'].update({'expire_ts':$pexp,'days':$days})
 json.dump(d,open('$USERS_JSON','w'),indent=1)
 "
   fi
+  if [[ -n $adays ]]; then
+    local cur; cur=$(jget "$user" "e.get('expire_ts',0)")
+    local base; [[ ${cur:-0} -gt $now ]] && base=$cur || base=$now
+    local pexp=$((base + adays*86400))
+    usermod -e "$(date -u -d "@$pexp" '+%Y-%m-%d')" "$user"
+    python3 -c "
+import json
+d=json.load(open('$USERS_JSON'))
+d['$user'].update({'expire_ts':$pexp})
+json.dump(d,open('$USERS_JSON','w'),indent=1)
+"
+    log "extend $user +$adays hari → $(date -u -d "@$pexp" '+%F')"
+  fi
+  local bwd="" bwu=""
+  [[ -n $bw ]] && IFS=/ read -r bwd bwu <<< "$bw"
   if [[ -n $bw ]]; then
-    local bwd bwu; IFS=/ read -r bwd bwu <<< "$bw"
-    edge_ctl "{\"cmd\":\"setbw\",\"user\":\"$user\",\"bw_down_mbps\":$bwd,\"bw_up_mbps\":$bwu}"
     python3 -c "
 import json
 d=json.load(open('$USERS_JSON'))
@@ -269,11 +295,70 @@ d['$user'].update({'bw_down_mbps':$bwd,'bw_up_mbps':$bwu})
 json.dump(d,open('$USERS_JSON','w'),indent=1)
 "
   fi
+  if [[ -n $quota ]]; then
+    python3 -c "
+import json
+d=json.load(open('$USERS_JSON'))
+d['$user'].update({'quota_gb':$quota})
+json.dump(d,open('$USERS_JSON','w'),indent=1)
+"
+  fi
+  if [[ -n $bw || -n $quota || $unblock -eq 1 || $rquota -eq 1 ]]; then
+    local spec
+    spec=$(python3 -c "
+import json
+d = {'cmd': 'setbw', 'user': '$user'}
+$([[ -n $bw ]] && echo "d['bw_down_mbps'] = $bwd
+d['bw_up_mbps'] = $bwu")
+$([[ -n $quota ]] && echo "d['quota_gb'] = $quota")
+$([[ $unblock -eq 1 ]] && echo "d['unblock'] = True")
+$([[ $rquota -eq 1 ]] && echo "d['reset_quota'] = True")
+print(json.dumps(d))
+")
+    edge_alive && edge_ctl "$spec" || log "edge down — setbw skip"
+  fi
+  if [[ -n $warpflag ]]; then
+    if [[ $warpflag -eq 1 ]]; then
+      warp_rule_add "$user" || log "warp add gagal (WARP_IF?)"
+      python3 -c "
+import json
+d=json.load(open('$USERS_JSON'))
+d['$user'].update({'warp':1})
+json.dump(d,open('$USERS_JSON','w'),indent=1)
+"
+    else
+      warp_rule_del "$user"
+      python3 -c "
+import json
+d=json.load(open('$USERS_JSON'))
+d['$user'].update({'warp':0})
+json.dump(d,open('$USERS_JSON','w'),indent=1)
+"
+    fi
+  fi
   write_client_info "$user"
   log "set OK: $user"
 }
 
 do_list() {
+  if [[ "${1:-}" == "--json" ]]; then
+    python3 -c "
+import json
+try:
+    u=json.load(open('$USERS_JSON'))
+except Exception:
+    u={}
+try:
+    st=json.load(open('$STATS_JSON'))
+except Exception:
+    st={}
+for k, v in u.items():
+    v['stats'] = st.get(k, {'in':0,'out':0,'sessions':0,'active':0})
+    v['quota_used'] = v['stats']['in'] + v['stats']['out']
+print(json.dumps(u, indent=1))
+"
+    return
+  fi
   echo "=== USERS ==="
   python3 -c "
 import json, datetime
@@ -288,14 +373,62 @@ for u, v in sorted(d.items()):
   edge_alive && { echo "=== EDGE ==="; edge_ctl '{"cmd":"list"}'; } || echo "=== EDGE: down ==="
 }
 
+do_show() {
+  local user="$1"
+  if [[ "${2:-}" == "--json" ]]; then
+    python3 -c "
+import json, os
+try:
+    u=json.load(open('$USERS_JSON')).get('$user')
+except Exception:
+    u=None
+if u is None:
+    print(json.dumps({'error':'not found'})); raise SystemExit(1)
+try:
+    st=json.load(open('$STATS_JSON')).get('$user', {'in':0,'out':0,'sessions':0,'active':0})
+except Exception:
+    st={'in':0,'out':0,'sessions':0,'active':0}
+ci=''
+p='$STATE_DIR/client-$user.txt'
+if os.path.isfile(p):
+    ci=open(p).read()
+u['stats']=st
+u['quota_used']=st['in']+st['out']
+u['client_info']=ci
+print(json.dumps(u, indent=1))
+"
+    return
+  fi
+  cat "$STATE_DIR/client-$user.txt" 2>/dev/null || die "tidak ada"
+}
+
+do_backup() {
+  command -v rclone >/dev/null || die "rclone tidak ada (apt install rclone)"
+  [[ -n $R2_REMOTE ]] || die "R2_REMOTE kosong di $CONF"
+  mkdir -p "$STATE_DIR"
+  rclone copy "$STATE_DIR" "$R2_REMOTE:$R2_PATH/state" --transfers 4 --log-error || die "rclone state gagal"
+  rclone copy "$CONF_DIR" "$R2_REMOTE:$R2_PATH/config" --transfers 4 --log-error || die "rclone config gagal"
+  log "backup OK → $R2_REMOTE:$R2_PATH (state+config)"
+}
+
+do_restore() {
+  command -v rclone >/dev/null || die "rclone tidak ada"
+  [[ -n $R2_REMOTE ]] || die "R2_REMOTE kosong di $CONF"
+  mkdir -p "$STATE_DIR"
+  rclone copy "$R2_REMOTE:$R2_PATH/state" "$STATE_DIR" --transfers 4 --log-error || die "rclone restore gagal"
+  log "restore OK dari $R2_REMOTE:$R2_PATH — jalankan: systemctl restart mb-edge"
+}
+
 cmd="${1:-help}"
 shift || true
 case $cmd in
   add)       [[ -n ${1:-} ]] || die "usage: mb-ssh2 add <user> [days] [--udp] [--bw D/U] [--backend direct|tls] [--warp]"; do_add "$@" ;;
   del)       [[ -n ${1:-} ]] || die "usage: mb-ssh2 del <user>"; do_del "$1" ;;
   set)       [[ -n ${1:-} ]] || die "usage: mb-ssh2 set <user> [days] [--bw D/U]"; do_set "$@" ;;
-  list)      do_list ;;
-  show)      [[ -n ${1:-} ]] || die "usage: mb-ssh2 show <user>"; cat "$STATE_DIR/client-$1.txt" 2>/dev/null || die "tidak ada" ;;
+  list)      do_list "$@" ;;
+  show)      [[ -n ${1:-} ]] || die "usage: mb-ssh2 show <user> [--json]"; do_show "$1" "${2:-}" ;;
+  backup)    do_backup ;;
+  restore)   do_restore ;;
   edge-list)   edge_ctl '{"cmd":"list"}' ;;
   help|*)    grep -E "^# " "$0" | head -14 ;;
 esac
