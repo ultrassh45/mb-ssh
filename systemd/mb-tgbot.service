@@ -1,0 +1,12 @@
+[Unit]
+Description=mb-ssh Telegram backup/restore bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/mb-tgbot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

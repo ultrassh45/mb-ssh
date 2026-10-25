@@ -9,7 +9,12 @@
 #   mb-ssh2 list [--json]
 #   mb-ssh2 show <user> [--json]
 #   mb-ssh2 backup / restore   (rclone ke R2: R2_REMOTE + R2_PATH di mb.conf)
+#   mb-ssh2 setup              (wizard: set R2 + bot Telegram, tulis mb.conf, enable svc)
+#   mb-ssh2 menu               (menu interaktif: setup/backup/restore/status)
+#   mb-ssh2 status             (ringkasan config + user + log backup)
 #   mb-ssh2 edge-list / edge-add / edge-remove  (raw edge control)
+#
+# Bot Telegram (set via setup): /backup /restore /status /help
 #
 # Config: /etc/mb-ssh2/edge.json + /etc/mb-ssh2/mb.conf
 # State : /var/lib/mb-ssh/users.json
@@ -27,6 +32,8 @@ USERS_JSON="$STATE_DIR/users.json"
 STATS_JSON="$STATE_DIR/stats.json"
 R2_REMOTE="${R2_REMOTE:-}"
 R2_PATH="${R2_PATH:-mb-ssh/$(hostname)}"
+TG_BOT_TOKEN="${TG_BOT_TOKEN:-}"
+TG_CHAT_ID="${TG_CHAT_ID:-}"
 BADVPN_BIN="${BADVPN_BIN:-/usr/local/bin/badvpn-udpgw}"
 BADVPN_PORT_BASE="${BADVPN_PORT_BASE:-17000}"
 DROPBEAR_PORT="${DROPBEAR_PORT:-22022}"
@@ -535,6 +542,140 @@ do_restore() {
   log "restore OK dari $R2_REMOTE:$R2_PATH — jalankan: systemctl restart mb-edge"
 }
 
+_tg_notify() {
+  # kirim teks ke chat allow-list via Bot API; no-op kalau bot belum diset
+  # atau caller = bot (MB_TG_BOT) agar tidak double-message
+  [[ -n $TG_BOT_TOKEN && -n $TG_CHAT_ID ]] || return 0
+  [[ -z ${MB_TG_BOT:-} ]] || return 0
+  local chat payload
+  for chat in $(echo "$TG_CHAT_ID" | tr ',' ' '); do
+    payload=$(python3 -c "
+import json, sys
+cid = sys.argv[1]
+print(json.dumps({'chat_id': int(cid) if cid.lstrip('-').isdigit() else cid,
+                  'text': sys.argv[2]}))" "$chat" "$1" 2>/dev/null) || continue
+    curl -s -m 10 -H 'Content-Type: application/json' -X POST \
+      "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+      -d "$payload" >/dev/null 2>&1 || true
+  done
+}
+
+do_status() {
+  local nu
+  nu=$(python3 -c "import json; print(len(json.load(open('$USERS_JSON'))))" 2>/dev/null || echo "?")
+  echo "=== MB-SSH STATUS ==="
+  echo "Node      : $(hostname)"
+  echo "User SSH  : $nu akun"
+  echo "R2_REMOTE : ${R2_REMOTE:-<belum diset>}"
+  echo "R2_PATH   : ${R2_PATH}"
+  if [[ -n $TG_BOT_TOKEN ]]; then
+    echo "Bot TG    : tersambung (chat: ${TG_CHAT_ID})"
+    command -v systemctl >/dev/null 2>&1 && \
+      echo "bot svc   : $(systemctl is-active mb-tgbot 2>/dev/null || echo 'tidak jalan')"
+  else
+    echo "Bot TG    : <belum diset> (mb-ssh2 setup)"
+  fi
+  echo ""
+  echo "Log backup (3 terakhir):"
+  tail -3 /var/log/mb-ssh2-backup.log 2>/dev/null || echo "  (belum ada)"
+}
+
+_conf_set() {
+  # tulis KEY=VALUE ke $CONF (append kalau baris belum ada)
+  local key="$1" val="$2"
+  if grep -q "^${key}=" "$CONF" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=\"${val}\"|" "$CONF"
+  else
+    echo "${key}=\"${val}\"" >> "$CONF"
+  fi
+}
+
+do_setup() {
+  # wizard setup backup R2 + bot Telegram (bisa juga non-interaktif:
+  #   mb-ssh2 setup <R2_REMOTE> [R2_PATH] <TG_BOT_TOKEN> <TG_CHAT_ID>)
+  local r="${1:-}" p="${2:-}" tok="${3:-}" cid="${4:-}"
+  echo "=== SETUP BACKUP & BOT TELEGRAM ==="
+  if [[ -z $r ]]; then
+    echo ""
+    echo "--- [1/2] Backup R2 ---"
+    echo "R2 = nama remote rclone (buat dulu: rclone config → type: s3 → provider: Cloudflare)"
+    echo "Remote yang tersedia: $(rclone listremotes 2>/dev/null | tr '\n' ' ' || echo '(rclone tidak ada)')"
+    read -rp "R2_REMOTE [${R2_REMOTE:-<kosong>}:]: " r; r="${r:-$R2_REMOTE}"
+    read -rp "R2_PATH [${R2_PATH}]: " p; p="${p:-$R2_PATH}"
+  fi
+  if [[ -n $r ]]; then
+    command -v rclone >/dev/null || die "rclone tidak ada — apt install rclone"
+    rclone listremotes 2>/dev/null | grep -q "^${r}:" || \
+      die "rclone remote '$r' tidak ada — buat dulu: rclone config"
+    _conf_set R2_REMOTE "$r"
+    _conf_set R2_PATH "$p"
+    log "R2 tersimpan: $r:$p (cron 03:03 aktif)"
+  else
+    log "R2 dilewati"
+  fi
+  if [[ -z $tok ]]; then
+    echo ""
+    echo "--- [2/2] Bot Telegram ---"
+    echo "1) Buat bot: chat @BotFather → /newbot → salin token"
+    echo "2) Chat id: kirim pesan ke bot kamu, buka:"
+    echo "   https://api.telegram.org/bot<TOKEN>/getUpdates → cari \"chat\":{\"id\":123...}"
+    read -rp "TG_BOT_TOKEN [${TG_BOT_TOKEN:***}]: " tok; tok="${tok:-$TG_BOT_TOKEN}"
+    read -rp "TG_CHAT_ID [${TG_CHAT_ID:-<kosong>}]: " cid; cid="${cid:-$TG_CHAT_ID}"
+  fi
+  if [[ -n $tok ]]; then
+    local who
+    who=$(curl -s -m 10 "https://api.telegram.org/bot${tok}/getMe" 2>/dev/null | \
+      python3 -c "import json,sys
+try:
+    d=json.load(sys.stdin)
+    print('@'+d['result']['username'] if d.get('ok') else 'GAGAL: '+str(d.get('description','?'))[:80])
+except Exception:
+    print('GAGAL cek (network?)')" 2>/dev/null)
+    [[ $who == @* ]] || die "TG_BOT_TOKEN tidak valid ($who) — cek token dari @BotFather"
+    _conf_set TG_BOT_TOKEN "$tok"
+    _conf_set TG_CHAT_ID "$cid"
+    log "bot tersimpan: $who (chat: $cid)"
+    if [[ -f /etc/systemd/system/mb-tgbot.service ]]; then
+      systemctl daemon-reload 2>/dev/null
+      systemctl enable --now mb-tgbot 2>/dev/null && \
+        log "service mb-tgbot aktif" || log "start service gagal — cek: systemctl status mb-tgbot"
+    else
+      log "unit mb-tgbot.service belum ada — update node (bash run.sh) lalu: systemctl enable --now mb-tgbot"
+    fi
+    echo "Kirim /help ke bot untuk daftar perintah."
+  else
+    log "bot dilewati"
+  fi
+  echo ""
+  echo "Verifikasi: mb-ssh2 status"
+}
+
+do_menu() {
+  local choice c
+  while true; do
+    echo ""
+    echo "================ MB-SSH MENU ================"
+    echo " R2  : ${R2_REMOTE:-<belum diset>}  (${R2_PATH})"
+    echo " Bot : ${TG_BOT_TOKEN:+tersambung${TG_CHAT_ID:+ (chat $TG_CHAT_ID)}}${TG_BOT_TOKEN:-<belum diset>}"
+    echo " User: $(python3 -c "import json; print(len(json.load(open('$USERS_JSON'))))" 2>/dev/null || echo 0) akun"
+    echo "=============================================="
+    echo " 1) Setup backup R2 + bot Telegram (wizard)"
+    echo " 2) Backup sekarang"
+    echo " 3) Restore dari R2"
+    echo " 4) Status"
+    echo " 0) Keluar"
+    read -rp "Pilih [0-4]: " choice
+    case $choice in
+      1) do_setup ;;
+      2) do_backup; _tg_notify "✅ Backup OK — $(date '+%d %b %Y %H:%M') — $(hostname)" ;;
+      3) read -rp "RESTORE menimpa state + DB Marzban dari R2. Yakin? (y/N): " c
+         [[ $c == [yY]* ]] && { do_restore; _tg_notify "✅ Restore OK — $(date '+%d %b %Y %H:%M') — $(hostname)"; } || echo "batal" ;;
+      4) do_status ;;
+      0|*) break ;;
+    esac
+  done
+}
+
 cmd="${1:-help}"
 shift || true
 case $cmd in
@@ -545,6 +686,9 @@ case $cmd in
   show)      [[ -n ${1:-} ]] || die "usage: mb-ssh2 show <user> [--json]"; do_show "$1" "${2:-}" ;;
   backup)    do_backup ;;
   restore)   do_restore ;;
+  status)    do_status ;;
+  setup)     do_setup "$@" ;;
+  menu)      do_menu ;;
   edge-list)   edge_ctl '{"cmd":"list"}' ;;
-  help|*)    grep -E "^# " "$0" | head -14 ;;
+  help|*)    grep -E "^# " "$0" | head -18 ;;
 esac

@@ -13,14 +13,17 @@ runtime/
                                 RESTORE + stats + quota + WARP monitor + HTTP API
   mb-ssh2.sh                ← CLI: add/del/set/list/show/backup/restore
                                 (+ --udp --bw --tls --warp --quota --add-days --json)
-  mb-ssh2-cleanup.sh        ← auto-del expired (cron 04:17)
+  mb-ssh2-cleanup.sh        ← proses expired (cron 04:17): hapus (default) atau
+                                keep+lock (AUTO_DELETE_EXPIRED=0 di mb.conf)
+  mb-tgbot.py               ← bot Telegram: /backup /restore /status (allow-list chat)
 config/
-  mb.conf                   ← PORT_POOL, DOMAIN, WARP_IF, R2_REMOTE (per node, tidak ditimpa)
+  mb.conf                   ← PORT_POOL, DOMAIN, WARP_IF, R2, TG bot, AUTO_DELETE_EXPIRED
   edge.json                 ← common ports + backend + api (port/token/allow_ip) + warp
   stunnel-mb-ssh.conf       ← SSH TLS backend
 systemd/
   mb-edge.service
   dropbear-client.service
+  mb-tgbot.service          ← enable otomatis setelah `mb-ssh2 setup` (token valid)
 tests/
   test.sh                     ← suite functional (26 check, port 29xxx, isolated)
 legacy/v1/                  ← versi lama (Marzban-sync), arsip
@@ -56,7 +59,34 @@ mb-ssh2 list --json                                  # semua akun + stats (JSON)
 mb-ssh2 del budi
 mb-ssh2 backup                                      # backup ssh state + Marzban DB + config → R2
 mb-ssh2 restore                                     # pull dari R2 → restore ssh + Marzban
+mb-ssh2 setup                                       # wizard: set R2 + bot Telegram (tulis mb.conf, enable svc)
+mb-ssh2 menu                                        # menu interaktif (setup/backup/restore/status)
+mb-ssh2 status                                      # ringkasan config + user + log backup
 ```
+
+## Menu CLI & Bot Telegram
+**Setup sekali** (di VPS node):
+```bash
+mb-ssh2 setup    # wizard interaktif:
+                 #  [1/2] R2  → nama remote rclone + path (divalidasi dulu)
+                 #  [2/2] Bot → token @BotFather + chat id (divalidasi via getMe)
+mb-ssh2 menu     # menu berjalan: backup/restore/status kapan saja
+mb-ssh2 status   # cek: R2 set? bot jalan? user berapa?
+```
+Non-interaktif (script): `mb-ssh2 setup <R2_REMOTE> [R2_PATH] <TG_BOT_TOKEN> <TG_CHAT_ID>`
+Token invalid = **ditolak**, tidak dituliskan ke config.
+
+**Bot Telegram** (setelah `setup`): service `mb-tgbot` aktif (systemd, restart on-failure).
+Kirim ke bot:
+| Perintah | Aksi di node |
+|---|---|
+| `/backup` | `mb-ssh2 backup` — balas = output asli CLI |
+| `/restore` | `mb-ssh2 restore` (menimpa state + DB Marzban) |
+| `/status` | node + jumlah user + config R2 |
+| `/help` | daftar perintah |
+
+Keamanan: hanya chat_id di `TG_CHAT_ID` (allow-list, boleh koma-separated) yang diproses.
+Cron 03:03 tetap jalan — hasilnya juga masuk log `/var/log/mb-ssh2-backup.log`.
 
 ## Backup & Restore (otomatis)
 **Cron** (pasang `run.sh`): `3 3 * * *` → `mb-ssh2 backup` → `rclone copy` ke R2
@@ -85,6 +115,9 @@ Yang di-backup (per node, path R2: `$R2_PATH/{state,config}`):
   `now >= expire_ts`, edge auto-blok dengan alasan `expired` (koneksi baru ditolak,
   koneksi aktif ditutup, loop 60s). `set <user> --add-days N` / PATCH `add_days`
   memperpanjang → auto unblock `expired`. 0 = unlimited.
+  Setelah itu cron 04:17: **default MENGHAPUS** akun expired
+  (`AUTO_DELETE_EXPIRED=1`); set `0` di mb.conf = akun **dipertahankan** (tetap
+  locked, bisa langsung di-extend) — pilihan operator.
 - **Stats**     : byte in/out, sesi total, sesi aktif — persist ke `stats.json` (flush 60s
   + saat remove). Dipakai `list/show --json` dan API.
 - **Blocked live**: `list --json` & API `/v1/users` menyertakan `blocked`

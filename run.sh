@@ -51,6 +51,7 @@ log "Step 3/4: Deploy runtime..."
 install -m 755 "$ROOT/runtime/mb-edge.py"        /usr/local/bin/mb-edge
 install -m 755 "$ROOT/runtime/mb-ssh2.sh"        /usr/local/bin/mb-ssh2
 install -m 755 "$ROOT/runtime/mb-ssh2-cleanup.sh" /usr/local/bin/mb-ssh2-cleanup
+install -m 755 "$ROOT/runtime/mb-tgbot.py"       /usr/local/bin/mb-tgbot
 mkdir -p /etc/mb-ssh2 /var/lib/mb-ssh /run/mb-ssh
 
 # config (jangan timpa yang sudah ada = idempotent upgrade)
@@ -86,11 +87,16 @@ cat > /etc/motd <<EOF
 EOF
 log "[ok] /etc/motd (branding)"
 
-for unit in mb-edge dropbear-client; do
+for unit in mb-edge dropbear-client mb-tgbot; do
   install -m 644 "$ROOT/systemd/$unit.service" "/etc/systemd/system/$unit.service"
 done
 systemctl daemon-reload
 systemctl enable --now dropbear-client.service stunnel.service mb-edge.service
+# bot TG: enable cuma kalau sudah ada token (idempotent upgrade)
+if grep -Eq '^TG_BOT_TOKEN=".{5,}"' /etc/mb-ssh2/mb.conf 2>/dev/null; then
+  systemctl enable --now mb-tgbot.service
+  log "[ok] mb-tgbot aktif (token sudah ada di mb.conf)"
+fi
 sleep 1
 
 # ---------- 4. Cron + verifikasi ----------
@@ -119,7 +125,9 @@ echo "
       http://\$(hostname -I | awk '{print \$1}'):8499/v1/health
       header: Authorization: Bearer <API_TOKEN di atas / edge.json>
       simpan token di panel (ProxyNode.api_token), TIDAK akan tampil lagi
-   5. Backup (opsional): set R2_REMOTE di /etc/mb-ssh2/mb.conf
-      (cron 03:03 sudah pasang; tanpa R2_REMOTE = no-op)
+   5. Backup + bot Telegram (disarankan): jalankan:
+      mb-ssh2 setup    # wizard: set R2 (rclone) + token bot @BotFather
+      atau: mb-ssh2 menu — backup/restore/status dari terminal
+      Setelah itu kirim /backup ke bot Telegram untuk backup on-demand.
    6. Update node (nanti): git pull + jalankan ulang: bash run.sh
 ============================================================"

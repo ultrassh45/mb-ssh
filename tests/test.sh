@@ -295,6 +295,56 @@ bash -c "source $V2/mb-ssh2.sh >/dev/null 2>&1; _mbz_restore" >/dev/null 2>&1
 grep -q "fake-mbz-db-v1" /opt/marzban/db.sqlite3; check $? "restore: db.sqlite3 pulih dari tar"
 rm -rf /opt/marzban
 
+echo "=== 7d. MENU, SETUP, BOT TG ==="
+CLI status | grep -q "MB-SSH STATUS"; check $? "status: output"
+# setup: token invalid → ditolak, conf bersih (cek network ke Telegram API)
+CLI setup "" "" "123:FAKE_TOKEN_TEST" "999" >/dev/null 2>&1
+! grep -q 'TG_BOT_TOKEN="123:FAKE_TOKEN_TEST"' $T/conf/mb.conf; check $? "setup: token invalid ditolak (conf bersih)"
+# menu: item status + keluar (input dipipe)
+OUT=$(printf '4\n0\n' | CLI menu 2>/dev/null)
+echo "$OUT" | grep -q "MB-SSH MENU"; check $? "menu: tampil"
+echo "$OUT" | grep -q "MB-SSH STATUS"; check $? "menu: item 4 (status) jalan"
+# bot handler (unit, tanpa network)
+HELP=$(python3 -c "
+import importlib.util
+spec = importlib.util.spec_from_file_location('mbtg', '$V2/mb-tgbot.py')
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(m.handle('/help', {}))" 2>/dev/null)
+echo "$HELP" | grep -q "/backup"; check $? "bot: /help daftar perintah"
+ST=$(python3 -c "
+import importlib.util
+spec = importlib.util.spec_from_file_location('mbtg', '$V2/mb-tgbot.py')
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(m.handle('/status', {'R2_REMOTE': 'r2', 'R2_PATH': 'mb-ssh/t'}))" 2>/dev/null)
+echo "$ST" | grep -q "R2     : r2"; check $? "bot: /status baca conf"
+
+echo "=== 7e. CLEANUP expired: AUTO_DELETE_EXPIRED 1 vs 0 ==="
+CLI add texp 1 >/dev/null 2>&1
+python3 - "$T/state/users.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["texp"]["expire_ts"] = 1000000000
+json.dump(d, open(p, "w"))
+PY
+MB_SSH_CONF=$T/conf/mb.conf MB_SSH_USERS=$T/state/users.json MB_SSH2_BIN=$V2/mb-ssh2.sh \
+  bash $V2/mb-ssh2-cleanup.sh >/dev/null 2>&1
+! python3 -c "import json; assert 'texp' in json.load(open('$T/state/users.json'))" 2>/dev/null
+check $? "cleanup: expired dihapus (default AUTO_DELETE_EXPIRED=1)"
+CLI add texp 1 >/dev/null 2>&1
+python3 - "$T/state/users.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["texp"]["expire_ts"] = 1000000000
+json.dump(d, open(p, "w"))
+PY
+MB_SSH_CONF=$T/conf/mb.conf MB_SSH_USERS=$T/state/users.json MB_SSH2_BIN=$V2/mb-ssh2.sh \
+  AUTO_DELETE_EXPIRED=0 bash $V2/mb-ssh2-cleanup.sh >/dev/null 2>&1
+python3 -c "import json; assert 'texp' in json.load(open('$T/state/users.json'))" 2>/dev/null
+check $? "cleanup: AUTO_DELETE_EXPIRED=0 → akun expired dipertahankan (lock, bisa extend)"
+CLI del texp >/dev/null 2>&1
+
 echo "=== 8. cleanup ==="
 CLI del test1 >/dev/null 2>&1
 kill -TERM $EDGE_PID 2>/dev/null; wait $EDGE_PID 2>/dev/null
