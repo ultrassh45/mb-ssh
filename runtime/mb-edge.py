@@ -613,9 +613,15 @@ class Edge:
         return True
 
     async def _cli(self, *args, timeout=15):
+        env = dict(os.environ)
+        # pastikan CLI melihat ctl socket + state + config yang SAMA dengan edge ini
+        env["EDGE_CTL"] = CTL_PATH
+        env["STATE_DIR"] = os.path.dirname(STATE_FILE)
+        env["CONF_DIR"] = os.path.dirname(CFG_PATH)
         try:
             p = await asyncio.create_subprocess_exec(
                 SSH2_BIN, *args,
+                env=env,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             out, err = await asyncio.wait_for(p.communicate(), timeout=timeout)
             return p.returncode, out.decode().strip(), err.decode().strip()
