@@ -279,6 +279,22 @@ else
   check 1 "GUARD: log ban tidak ada"
 fi
 
+echo "=== 7c. BACKUP: ssh state + marzban (fake) → tar → restore ==="
+# fake marzban install (VPS ini bukan node — cukup verifikasi logika)
+mkdir -p /opt/marzban
+printf 'fake-mbz-db-v1\n' > /opt/marzban/db.sqlite3
+printf '{"fake":true}\n' > /opt/marzban/xray_config.json
+bash -c "source $V2/mb-ssh2.sh >/dev/null 2>&1; _mbz_backup" >/dev/null 2>&1
+[[ -f $T/state/marzban-latest.tar.gz ]]; check $? "backup: marzban-latest.tar.gz dibuat"
+TARLIST=$(tar tzf $T/state/marzban-latest.tar.gz 2>/dev/null | tr '\n' ' ')
+echo "$TARLIST" | grep -q "marzban.db"; check $? "backup: db di dalam tar"
+echo "$TARLIST" | grep -q "xray_config.json"; check $? "backup: xray_config.json di dalam tar"
+# rusak db → restore harus memulihkan
+echo "CORRUPTED" > /opt/marzban/db.sqlite3
+bash -c "source $V2/mb-ssh2.sh >/dev/null 2>&1; _mbz_restore" >/dev/null 2>&1
+grep -q "fake-mbz-db-v1" /opt/marzban/db.sqlite3; check $? "restore: db.sqlite3 pulih dari tar"
+rm -rf /opt/marzban
+
 echo "=== 8. cleanup ==="
 CLI del test1 >/dev/null 2>&1
 kill -TERM $EDGE_PID 2>/dev/null; wait $EDGE_PID 2>/dev/null

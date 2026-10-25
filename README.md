@@ -54,9 +54,27 @@ mb-ssh2 show budi                                    # client-info (salin ke cus
 mb-ssh2 show budi --json                             # detail + stats + quota_used (JSON)
 mb-ssh2 list --json                                  # semua akun + stats (JSON)
 mb-ssh2 del budi
-mb-ssh2 backup                                       # push state+config ke R2
-mb-ssh2 restore                                      # tarik balik dari R2
+mb-ssh2 backup                                      # backup ssh state + Marzban DB + config → R2
+mb-ssh2 restore                                     # pull dari R2 → restore ssh + Marzban
 ```
+
+## Backup & Restore (otomatis)
+**Cron** (pasang `run.sh`): `3 3 * * *` → `mb-ssh2 backup` → `rclone copy` ke R2
+(`R2_REMOTE` + `R2_PATH` di `/etc/mb-ssh2/mb.conf`; kosong = off).
+
+Yang di-backup (per node, path R2: `$R2_PATH/{state,config}`):
+| Isi | Asalnya | Cakupan |
+|---|---|---|
+| `users.json` + `stats.json` | `$STATE_DIR` | semua akun **SSH** (port, bw, quota, expire, warp, udp) |
+| `marzban-latest.tar.gz` | `sqlite3 .backup` (online, konsisten) `db.sqlite3` + `xray_config.json` | semua client **VLESS/VMess/Trojan/SS** + config core |
+| `mb.conf` + `edge.json` | `$CONF_DIR` | pool port, backend, WARP, guard, token API |
+
+**Restore** — 2 skenario:
+1. **Node rusak, VPS sama**: `mb-ssh2 restore` → tarik state+config+Marzban dari R2 →
+   DB Marzban ditukar otomatis (`marzban down`/`up`) → `systemctl restart mb-edge`.
+2. **Pindah VPS baru**: install fresh (`bash run.sh`) → set `R2_REMOTE`/`R2_PATH` yang sama →
+   `mb-ssh2 restore` → `systemctl restart mb-edge`. Semua akun SSH + client VPN kembali,
+   port & kuota & expire utuh (edge re-load dari `users.json` saat start).
 
 ## Fitur per-user
 - **Bandwidth** : token-bucket di edge (bytes/sec, down/up terpisah, hot-apply tanpa restart).

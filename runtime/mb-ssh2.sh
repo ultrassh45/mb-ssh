@@ -469,13 +469,60 @@ print(json.dumps(u, indent=1))
   cat "$STATE_DIR/client-$user.txt" 2>/dev/null || die "tidak ada"
 }
 
+_mbz_backup() {
+  # Marzban (VLESS/VMess/Trojan): DB SQLite online-backup + xray config → STATE_DIR
+  # (ikut ter-upload ke R2 via rclone copy STATE_DIR)
+  [[ -d /opt/marzban ]] || { log "marzban tidak ada — skip"; return 1; }
+  local tmp; tmp=$(mktemp -d)
+  local ok=0
+  if [[ -f /opt/marzban/db.sqlite3 ]]; then
+    if command -v sqlite3 >/dev/null && \
+       sqlite3 /opt/marzban/db.sqlite3 ".backup '$tmp/marzban.db'" 2>/dev/null; then
+      ok=1
+    else
+      # fallback: copy mentah (DR — copy mungkin inconsistent, tapi lebih baik dari tak ada)
+      cp /opt/marzban/db.sqlite3 "$tmp/marzban.db" 2>/dev/null && ok=1
+    fi
+  fi
+  [[ $ok -eq 1 ]] || { rm -rf "$tmp"; log "db.sqlite3 tidak bisa di-backup — skip"; return 1; }
+  cp /opt/marzban/xray_config.json "$tmp/xray_config.json" 2>/dev/null
+  tar czf "$STATE_DIR/marzban-latest.tar.gz" -C "$tmp" .
+  rm -rf "$tmp"
+  log "marzban backup OK ($(du -h "$STATE_DIR/marzban-latest.tar.gz" | cut -f1))"
+}
+
+_mbz_restore() {
+  # kembalikan DB Marzban dari marzban-latest.tar.gz (sudah ditarik do_restore dari R2)
+  [[ -f /opt/marzban/db.sqlite3 ]] || { log "marzban tidak ada — skip restore"; return 1; }
+  [[ -f "$STATE_DIR/marzban-latest.tar.gz" ]] || { log "marzban-latest.tar.gz tidak ada — skip"; return 1; }
+  local tmp; tmp=$(mktemp -d)
+  tar xzf "$STATE_DIR/marzban-latest.tar.gz" -C "$tmp"
+  if command -v marzban >/dev/null; then
+    marzban down 2>/dev/null || true
+  else
+    docker compose -f /opt/marzban/docker-compose.yml down 2>/dev/null || true
+  fi
+  cp "$tmp/marzban.db" /opt/marzban/db.sqlite3
+  [[ -f "$tmp/xray_config.json" ]] && cp "$tmp/xray_config.json" /opt/marzban/xray_config.json
+  if command -v marzban >/dev/null; then
+    marzban up || log "PERHATIAN: marzban up gagal — jalankan manual: marzban up"
+  elif docker compose -f /opt/marzban/docker-compose.yml up -d 2>/dev/null; then
+    :
+  else
+    log "PERHATIAN: start marzban otomatis gagal — jalankan manual: marzban up"
+  fi
+  rm -rf "$tmp"
+  log "marzban restore OK"
+}
+
 do_backup() {
   command -v rclone >/dev/null || die "rclone tidak ada (apt install rclone)"
   [[ -n $R2_REMOTE ]] || die "R2_REMOTE kosong di $CONF"
   mkdir -p "$STATE_DIR"
+  _mbz_backup || true
   rclone copy "$STATE_DIR" "$R2_REMOTE:$R2_PATH/state" --transfers 4 --log-error || die "rclone state gagal"
   rclone copy "$CONF_DIR" "$R2_REMOTE:$R2_PATH/config" --transfers 4 --log-error || die "rclone config gagal"
-  log "backup OK → $R2_REMOTE:$R2_PATH (state+config)"
+  log "backup OK → $R2_REMOTE:$R2_PATH (ssh state + marzban + config)"
 }
 
 do_restore() {
@@ -483,6 +530,8 @@ do_restore() {
   [[ -n $R2_REMOTE ]] || die "R2_REMOTE kosong di $CONF"
   mkdir -p "$STATE_DIR"
   rclone copy "$R2_REMOTE:$R2_PATH/state" "$STATE_DIR" --transfers 4 --log-error || die "rclone restore gagal"
+  rclone copy "$R2_REMOTE:$R2_PATH/config" "$CONF_DIR" --transfers 4 --log-error || true
+  _mbz_restore || true
   log "restore OK dari $R2_REMOTE:$R2_PATH — jalankan: systemctl restart mb-edge"
 }
 
