@@ -408,6 +408,17 @@ bash -c "source $V2/mb-ssh2.sh >/dev/null 2>&1; REPO_URL= do_login_check | head 
 [[ $? -eq 0 ]]; check $? "login-check tanpa repo: no-op (tidak tampil prompt)"
 # do_update --check perlu git; tanpa repo = rc 2 (tidak crash) — sudah dites 7g
 
+echo "=== 7i. DROPBEAR multi-versi (CLI, tanpa build) ==="
+# dropbear list tampilkan opsi (bin tak ada di sandbox → '?')
+bash -c "source $V2/mb-ssh2.sh >/dev/null 2>&1; DROPBEAR_BIN=/nonexistent DROPBEAR_DIR=$T/db do_dropbear" 2>/dev/null | grep -q "2019.78"
+check $? "dropbear list: menampilkan versi 2019.78 (default)"
+# set versi tidak dikenal → die (rc!=0), tidak crash
+bash -c "source $V2/mb-ssh2.sh >/dev/null 2>&1; DROPBEAR_DIR=$T/db do_dropbear set 9999" 2>/dev/null
+[[ $? -ne 0 ]]; check $? "dropbear set versi tak dikenal: ditolak"
+# set tanpa arg → die (penggunaan)
+bash -c "source $V2/mb-ssh2.sh >/dev/null 2>&1; DROPBEAR_DIR=$T/db do_dropbear set" 2>/dev/null
+[[ $? -ne 0 ]]; check $? "dropbear set tanpa arg: ditolak (usage)"
+
 echo "=== 8. cleanup ==="
 CLI del test1 >/dev/null 2>&1
 kill -TERM $EDGE_PID 2>/dev/null; wait $EDGE_PID 2>/dev/null

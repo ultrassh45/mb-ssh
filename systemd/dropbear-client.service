@@ -4,7 +4,7 @@ After=network.target
 Before=mb-edge.service
 
 [Service]
-ExecStart=/usr/sbin/dropbear -F -p 127.0.0.1:22022
+ExecStart=/usr/local/bin/dropbear -F -p 127.0.0.1:22022 -b /etc/issue.net
 Restart=on-failure
 
 [Install]

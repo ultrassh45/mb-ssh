@@ -101,6 +101,34 @@ Kirim ke bot:
 
 Keamanan: hanya chat_id di `TG_CHAT_ID` (allow-list, boleh koma-separated) yang diproses.
 
+## Dropbear multi-versi
+Default saat install = **DROPBEAR 2019.78** (rilis terakhir 2019). Kalau build gagal →
+otomatis fallback berurutan (2020.81 → 2022.83 → 2024.85 → 2025.89 → apt dropbear).
+Semua versi dibangun dari source resmi mkj/dropbear (autotools, ±1 menit).
+
+| Perintah | Fungsi |
+|---|---|
+| `mb-ssh2 dropbear` | versi aktif + daftar versi tersedia |
+| `mb-ssh2 dropbear set 2022.83` | ganti: build versi pilihan → pasang → **hapus versi lain** → restart service |
+| `mb-ssh2 dropbear status` | versi dropbear yang berjalan |
+| menu → 13 | sama, interaktif |
+
+Versi yang tersedia: `2019.78` (default) · `2020.81` · `2022.83` · `2024.85` · `2025.89`.
+Binary symlink di `/usr/local/bin/dropbear` → service `dropbear-client` restart otomatis.
+
+## Banner `/etc/issue.net` (customer)
+Saat install (`run.sh`), dibuat `/etc/issue.net` — **banner sambutan yang tampil ke
+customer sebelum login SSH/VPN**:
+```
+=============================================================
+  <domain> — Terima kasih telah menggunakan layanan VPN kami.
+  Support : zxpedia
+=============================================================
+```
+Dropbear memberikannya via `-b /etc/issue.net` (unit `dropbear-client.service`).
+Ubah teksnya bebas di `/etc/issue.net` → berlaku setelah
+`systemctl restart dropbear-client`.
+
 ## Backup & Restore (otomatis)
 **Cron** (pasang `run.sh`): `3 3 * * *` → `mb-ssh2 backup` → `rclone copy` ke R2
 (`R2_REMOTE` + `R2_PATH` di `/etc/mb-ssh2/mb.conf`; kosong = off).

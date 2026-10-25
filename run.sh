@@ -87,6 +87,15 @@ cat > /etc/motd <<EOF
 EOF
 log "[ok] /etc/motd (branding)"
 
+# Banner issue.net — tampil ke CUSTOMER saat konek SSH/VPN (sebelum login)
+cat > /etc/issue.net <<EOF
+=============================================================
+  ${DOMAIN} — Terima kasih telah menggunakan layanan VPN kami.
+  Support : ${SUPPORT:-zxpedia}
+=============================================================
+EOF
+log "[ok] /etc/issue.net (banner customer)"
+
 for unit in mb-edge dropbear-client mb-tgbot; do
   install -m 644 "$ROOT/systemd/$unit.service" "/etc/systemd/system/$unit.service"
 done

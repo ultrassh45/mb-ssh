@@ -8,10 +8,86 @@ WARP="${1:-0}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ---------- paket ----------
-log "install dropbear + stunnel4..."
+log "install prereq + stunnel4..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq dropbear stunnel4 rclone >/dev/null
+apt-get install -y -qq stunnel4 rclone gcc make zlib1g-dev autoconf automake libtool 2>/dev/null >/dev/null || \
+  apt-get install -y -qq stunnel4 rclone gcc make zlib1g-dev >/dev/null
+
+# ---------- dropbear (multi-versi, default 2019) ----------
+# Default: DROPBEAR_2019.78 (rilis terakhir tahun 2019 — yang familier di autoscript).
+# Kalau build 2019 gagal → fallback versi lain (dari list). User bisa ganti via:
+#   mb-ssh2 dropbear set <versi>   (uninstall yang terpasang, build yang dipilih)
+# Ternary attack: binary di /usr/local/bin/dropbear; dropbearmulti juga.
+log "dropbear multi-versi (default 2019)..."
+ARCH=$(uname -m)
+case $ARCH in
+  x86_64)  BA=amd64 ;;
+  aarch64) BA=arm64 ;;
+  *) die "arch $ARCH tidak didukung" ;;
+esac
+DROPBEAR_DEFAULT="${DROPBEAR_DEFAULT:-2019.78}"
+DROPBEAR_DIR="/opt/dropbear"
+mkdir -p "$DROPBEAR_DIR"
+
+_dropbear_build() {
+  # arg: versi (mis 2019.78) → source tar.gz tag DROPBEAR_<versi> → binary
+  local ver="$1"
+  local src="/opt/dropbear/src/dropbear-DROPBEAR_${ver}"
+  rm -rf "$src"
+  mkdir -p /opt/dropbear/src
+  log "dropbear build DROPBEAR_${ver} ..."
+  if curl -fsSL -m 120 "https://github.com/mkj/dropbear/archive/refs/tags/DROPBEAR_${ver}.tar.gz" | tar xz -C /opt/dropbear/src 2>/dev/null; then
+    (
+      cd "/opt/dropbear/src/dropbear-DROPBEAR_${ver}" && \
+      autoreconf -i >/dev/null 2>&1
+      ./configure 2>/dev/null && \
+      make -j"$(nproc)" >/dev/null 2>&1
+    )
+    if [[ -x "/opt/dropbear/src/dropbear-DROPBEAR_${ver}/dropbear" ]]; then
+      cp "/opt/dropbear/src/dropbear-DROPBEAR_${ver}/dropbear" "$DROPBEAR_DIR/dropbear-${ver}"
+      cp "/opt/dropbear/src/dropbear-DROPBEAR_${ver}/dropbearmulti" "$DROPBEAR_DIR/dropbearmulti-${ver}" 2>/dev/null || true
+      log "dropbear ${ver} build OK"
+      return 0
+    fi
+  fi
+  log "dropbear ${ver} build GAGAL"
+  return 1
+}
+
+# pilih versi: loop default → list fallback
+_dropbear_resolve() {
+  local v="$DROPBEAR_DEFAULT"
+  while :; do
+    # sudah pernah di-build di mesin ini → pakai langsung (tanpa rebuild)
+    if [[ -x "$DROPBEAR_DIR/dropbear-${v}" ]]; then
+      echo "$v"
+      return 0
+    fi
+    if _dropbear_build "$v"; then
+      echo "$v"
+      return 0
+    fi
+    case "$v" in
+      "$DROPBEAR_DEFAULT") v=2020.81 ;;
+      2020.81) v=2022.83 ;;
+      2022.83) v=2024.85 ;;
+      2024.85) v=2025.89 ;;
+      2025.89) echo ""; return 1 ;;
+    esac
+  done
+}
+
+# install versi aktif → /usr/local/bin/dropbear (symlink)
+PICKED=$(_dropbear_resolve)
+if [[ -z $PICKED ]]; then
+  log "SEMUA versi dropbear gagal build — fallback ke apt dropbear"
+  apt-get install -y -qq dropbear >/dev/null || die "dropbear gagal total"
+else
+  ln -sf "$DROPBEAR_DIR/dropbear-${PICKED}" /usr/local/bin/dropbear
+  ln -sf "$DROPBEAR_DIR/dropbearmulti-${PICKED}" /usr/local/bin/dropbearmulti 2>/dev/null || true
+  log "dropbear aktif: ${PICKED} (${BA})"
+fi
 
 # ---------- badvpn ----------
 log "badvpn-udpgw (prebuilt)..."

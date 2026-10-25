@@ -41,6 +41,8 @@ BIN_DIR="${BIN_DIR:-/usr/local/bin}"
 UNIT_DIR="${UNIT_DIR:-/etc/systemd/system}"
 ROLLBACK_DIR="${ROLLBACK_DIR:-$STATE_DIR/rollback}"
 UPDATE_CACHE="${UPDATE_CACHE:-/run/mb-ssh/update-available.txt}"
+DROPBEAR_DIR="${DROPBEAR_DIR:-/opt/dropbear}"
+DROPBEAR_DEFAULT="${DROPBEAR_DEFAULT:-2019.78}"
 BADVPN_BIN="${BADVPN_BIN:-/usr/local/bin/badvpn-udpgw}"
 BADVPN_PORT_BASE="${BADVPN_PORT_BASE:-17000}"
 DROPBEAR_PORT="${DROPBEAR_PORT:-22022}"
@@ -927,6 +929,86 @@ do_schedule() {
   log "jadwal backup: tiap $n ${unit} (BACKUP_INTERVAL=$iv)"
 }
 
+_dropbear_build() {
+  # arg: versi (mis 2019.78) → build dari source tag DROPBEAR_<versi>
+  local ver=$1
+  [[ -x "$DROPBEAR_DIR/dropbear-${ver}" ]] && { log "dropbear ${ver} sudah ter-build"; return 0; }
+  local sdir="$DROPBEAR_DIR/src"
+  mkdir -p "$sdir"
+  rm -rf "$sdir/dropbear-DROPBEAR_${ver}"
+  log "dropbear build DROPBEAR_${ver} ..."
+  curl -fsSL -m 180 "https://github.com/mkj/dropbear/archive/refs/tags/DROPBEAR_${ver}.tar.gz" \
+    | tar xz -C "$sdir" 2>/dev/null || { log "download/tar gagal"; return 1; }
+  (
+    cd "$sdir/dropbear-DROPBEAR_${ver}" || exit 1
+    # source GitHub TIDAK termasuk ./configure — harus generation dulu (autotools)
+    autoreconf -i >/dev/null 2>&1
+    ./configure --disable-lastlog --disable-lastlog 2>/dev/null \
+      || ./configure 2>/dev/null
+    make -j"$(nproc)" PROGRAMS=dropbear >/dev/null 2>&1
+  ) || { log "build gagal"; rm -rf "$sdir/dropbear-DROPBEAR_${ver}"; return 1; }
+  if [[ -x "$sdir/dropbear-DROPBEAR_${ver}/dropbear" ]]; then
+    cp "$sdir/dropbear-DROPBEAR_${ver}/dropbear" "$DROPBEAR_DIR/dropbear-${ver}"
+    log "dropbear ${ver} build OK"
+    return 0
+  fi
+  rm -rf "$sdir/dropbear-DROPBEAR_${ver}"
+  log "dropbear ${ver} build GAGAL"
+  return 1
+}
+
+do_dropbear() {
+  # kelola versi dropbear: list / set <versi>
+  #   mb-ssh2 dropbear            → tampilkan versi aktif + daftar versi tersedia
+  #   mb-ssh2 dropbear set <v>    → switch: build versi <v>, pasang, restart service
+  local action="${1:-}" ver="${2:-}" bin
+  bin="${DROPBEAR_BIN:-/usr/local/bin/dropbear}"
+  if [[ $action == list || -z $action ]]; then
+    echo "=== DROPBEAR ==="
+    echo "Aktif : $("$bin" -h 2>&1 | head -1 | grep -o 'Dropbear sshd [0-9.]*\|[0-9.]*' | head -1 || echo '?') ($bin)"
+    echo ""
+    echo "Tersedia (build lokal /opsi):"
+    for v in 2019.78 2020.81 2022.83 2024.85 2025.89; do
+      if [[ -x "$DROPBEAR_DIR/dropbear-$v" ]]; then
+        echo "  • $v  (ter-build ✓)"
+      else
+        echo "  • $v"
+      fi
+    done
+    echo ""
+    echo "Ganti: mb-ssh2 dropbear set <versi>" 2>/dev/null || echo "Ganti: mb-ssh2 dropbear set <versi>"
+    return 0
+  fi
+  if [[ $action == set ]]; then
+    [[ -n $ver ]] || die "usage: mb-ssh2 dropbear set <versi>  (2019.78 / 2020.81 / 2022.83 / 2024.85 / 2025.89)"
+    case "$ver" in
+      2019.78|2020.81|2022.83|2024.85|2025.89) ;;
+      *) die "versi tidak dikenal '$ver' — list: mb-ssh2 dropbear list" ;;
+    esac
+    _dropbear_build "$ver" || die "build ${ver} gagal"
+    # pasang versi yang dipilih
+    ln -sf "$DROPBEAR_DIR/dropbear-${ver}" /usr/local/bin/dropbear
+    ln -sf "$DROPBEAR_DIR/dropbearmulti-${ver}" /usr/local/bin/dropbearmulti 2>/dev/null || true
+    # "uninstall" versi lama: hapus binary non-aktif (kecuali yang dipakai), keep src
+    local v
+    for v in 2019.78 2020.81 2022.83 2024.85 2025.89; do
+      [[ $v == "$ver" ]] && continue
+      rm -f "$DROPBEAR_DIR/dropbear-$v" "$DROPBEAR_DIR/dropbearmulti-$v"
+      rm -rf "$DROPBEAR_DIR/src/dropbear-DROPBEAR_${v}"
+    done
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl restart dropbear-client 2>/dev/null || true
+    fi
+    log "dropbear switch ke ${ver} — versi lain dihapus, service direstart"
+    return 0
+  fi
+  if [[ $action == status ]]; then
+    "$bin" -h 2>&1 | head -3 || true
+    return 0
+  fi
+  die "subcommand dropbear tidak dikenal: '$action' (list/set/status)"
+}
+
 do_menu() {
   local choice c u d
   while true; do
@@ -950,8 +1032,9 @@ do_menu() {
     echo " 10) Status"
     echo " 11) Bantuan bot Telegram"
     echo " 12) Update script + auto-rollback"
+    echo " 13) Ganti versi dropbear (2019.78 default, bebas pilih)"
     echo " 0)  Keluar"
-    read -rp "Pilih [0-11]: " choice
+    read -rp "Pilih [0-13]: " choice
     case $choice in
       1) read -rp "Username: " u
          read -rp "Durasi (hari, kosong=30): " d; d="${d:-30}"
@@ -998,6 +1081,7 @@ PY
       11) echo "Perintah bot: /backup  /restore  /status  /help"
           echo "(hanya chat dari TG_CHAT_ID yang diproses)" ;;
       12) do_update ;;
+      13) do_dropbear ;;
       0|*) break ;;
     esac
   done
@@ -1021,6 +1105,7 @@ case $cmd in
   update)    [[ ${1:-} == --check ]] && _update_check || do_update ;;
   rollback)  do_rollback "$@" ;;
   login-check) do_login_check ;;
+  dropbear)  do_dropbear "$@" ;;
   edge-list)   edge_ctl '{"cmd":"list"}' ;;
   help|*)    grep -E "^# " "$0" | head -18 ;;
 esac
