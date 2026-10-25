@@ -104,9 +104,8 @@ log "Step 4/4: Cron cleanup + verify..."
 if ! crontab -l 2>/dev/null | grep -q "mb-ssh2-cleanup"; then
   (crontab -l 2>/dev/null; echo "17 4 * * * /usr/local/bin/mb-ssh2-cleanup >> /var/log/mb-ssh2-cleanup.log 2>&1") | crontab -
 fi
-if ! crontab -l 2>/dev/null | grep -q "mb-ssh2 backup"; then
-  (crontab -l 2>/dev/null; echo "3 3 * * * /usr/local/bin/mb-ssh2 backup >> /var/log/mb-ssh2-backup.log 2>&1") | crontab -
-fi
+# cron backup: idempotent — tulis ulang baris sesuai BACKUP_INTERVAL di mb.conf
+/usr/local/bin/mb-ssh2 backup-cron
 
 echo
 echo "============================================================"

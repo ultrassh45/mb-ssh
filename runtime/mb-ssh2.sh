@@ -10,8 +10,8 @@
 #   mb-ssh2 show <user> [--json]
 #   mb-ssh2 backup / restore   (rclone ke R2: R2_REMOTE + R2_PATH di mb.conf)
 #   mb-ssh2 setup              (wizard: set R2 + bot Telegram, tulis mb.conf, enable svc)
-#   mb-ssh2 menu               (menu interaktif: setup/backup/restore/status)
-#   mb-ssh2 status             (ringkasan config + user + log backup)
+#   mb-ssh2 schedule 30 m      (jadwal backup otomatis: 30 m / 6 j / 0 = harian 03:03)
+#   mb-ssh2 menu               (menu interaktif bernomor 0-11)
 #   mb-ssh2 edge-list / edge-add / edge-remove  (raw edge control)
 #
 # Bot Telegram (set via setup): /backup /restore /status /help
@@ -568,12 +568,13 @@ do_status() {
   echo "User SSH  : $nu akun"
   echo "R2_REMOTE : ${R2_REMOTE:-<belum diset>}"
   echo "R2_PATH   : ${R2_PATH}"
+  echo "Backup    : ${BACKUP_INTERVAL:-0} (0 = tiap hari 03:03)"
   if [[ -n $TG_BOT_TOKEN ]]; then
     echo "Bot TG    : tersambung (chat: ${TG_CHAT_ID})"
     command -v systemctl >/dev/null 2>&1 && \
       echo "bot svc   : $(systemctl is-active mb-tgbot 2>/dev/null || echo 'tidak jalan')"
   else
-    echo "Bot TG    : <belum diset> (mb-ssh2 setup)"
+    echo "Bot TG    : <belum diset> (mb-ssh2 menu → 1)"
   fi
   echo ""
   echo "Log backup (3 terakhir):"
@@ -650,27 +651,147 @@ except Exception:
   echo "Verifikasi: mb-ssh2 status"
 }
 
+_cron_spec() {
+  # dari BACKUP_INTERVAL: "30m"|30→menit, "6j"→jam, "0"/kosong→har 03:03
+  local iv="${BACKUP_INTERVAL:-0}"
+  iv=$(echo "$iv" | tr -d ' ')
+  case "$iv" in
+    0|"") echo "3 3 * * *" ;;
+    *m) local n=${iv%m}
+        [[ $n =~ ^[0-9]+$ ]] && [[ $n -ge 1 ]] && [[ $n -le 59 ]] && \
+          echo "*/$n * * * *" || echo "3 3 * * *" ;;
+    *j) local h=${iv%j}
+        [[ $h =~ ^[0-9]+$ ]] && [[ $h -ge 1 ]] && [[ $h -le 23 ]] && \
+          echo "0 */$h * * *" || echo "3 3 * * *" ;;
+    *)  if [[ $iv =~ ^[0-9]+$ ]] && [[ $iv -ge 1 ]] && [[ $iv -le 59 ]]; then
+          echo "*/$iv * * * *"
+        else
+          echo "3 3 * * *"
+        fi ;;
+  esac
+}
+
+apply_backup_cron() {
+  # tulis ulang baris cron 'mb-ssh2 backup' sesuai BACKUP_INTERVAL (idempotent)
+  local spec cronline
+  spec=$(_cron_spec)
+  cronline="$spec /usr/local/bin/mb-ssh2 backup >> /var/log/mb-ssh2-backup.log 2>&1"
+  python3 - "$cronline" <<'PY'
+import subprocess, sys
+line = sys.argv[1]
+r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+cur = r.stdout if r.returncode == 0 else ""
+keep = [l for l in cur.splitlines() if "mb-ssh2 backup" not in l and l.strip()]
+keep.append(line)
+c = "\n".join(keep) + "\n"
+subprocess.run(["crontab", "-"], input=c, text=True)
+PY
+  log "cron backup: ${spec} (BACKUP_INTERVAL=${BACKUP_INTERVAL:-0})"
+}
+
+do_schedule() {
+  # atur jadwal backup via CLI/bot (non-interaktif):
+  #   mb-ssh2 schedule 30 m   → tiap 30 menit
+  #   mb-ssh2 schedule 6 j    → tiap 6 jam
+  #   mb-ssh2 schedule 0      → jam 03:03 tiap hari (default)
+  # tulis BACKUP_INTERVAL ke mb.conf + apply cron (idempotent, tanpa restart)
+  local n="${1:-}" unit="${2:-}" iv
+  if [[ -z $n ]]; then
+    echo "=== JADWAL BACKUP ==="
+    echo "Sekarang: ${BACKUP_INTERVAL:-0}   (0 = tiap hari 03:03)"
+    echo "Contoh: '30 m' = tiap 30 menit | '6 j' = tiap 6 jam | '0' = tiap hari 03:03"
+    read -rp "Jadwal (mis. 30 m / 6 j / 0): " iv
+    set -- $iv
+    n="${1:-}"; unit="${2:-$([ "$n" == "0" ] && echo 0)}"
+  fi
+  if [[ -z $n || $n == 0 ]]; then
+    _conf_set BACKUP_INTERVAL "0"
+    BACKUP_INTERVAL="0"
+    apply_backup_cron
+    log "jadwal backup: MATI (tiap hari 03:03)"
+    return 0
+  fi
+  unit="${unit:-m}"
+  [[ $n =~ ^[0-9]+$ && $n -ge 1 ]] || die "angka interval tidak valid: '$n'"
+  case "$unit" in
+    m|menit)  iv="${n}m" ;;
+    j|jam)    iv="${n}j" ;;
+    *)        iv="${n}m" ;;
+  esac
+  _conf_set BACKUP_INTERVAL "$iv"
+  BACKUP_INTERVAL="$iv"
+  apply_backup_cron
+  log "jadwal backup: tiap $n ${unit} (BACKUP_INTERVAL=$iv)"
+}
+
 do_menu() {
-  local choice c
+  local choice c u d
   while true; do
     echo ""
     echo "================ MB-SSH MENU ================"
     echo " R2  : ${R2_REMOTE:-<belum diset>}  (${R2_PATH})"
     echo " Bot : ${TG_BOT_TOKEN:+tersambung${TG_CHAT_ID:+ (chat $TG_CHAT_ID)}}${TG_BOT_TOKEN:-<belum diset>}"
+    echo " Back: ${BACKUP_INTERVAL:-0} (0 = tiap hari 03:03)"
     echo " User: $(python3 -c "import json; print(len(json.load(open('$USERS_JSON'))))" 2>/dev/null || echo 0) akun"
     echo "=============================================="
-    echo " 1) Setup backup R2 + bot Telegram (wizard)"
-    echo " 2) Backup sekarang"
-    echo " 3) Restore dari R2"
-    echo " 4) Status"
-    echo " 0) Keluar"
-    read -rp "Pilih [0-4]: " choice
+    echo " 1)  Tambah akun SSH"
+    echo " 2)  Hapus akun SSH"
+    echo " 3)  Perpanjang akun (hari)"
+    echo " 4)  Daftar akun"
+    echo " 5)  Detail akun + client-info"
+    echo " 6)  Setup backup R2 + bot Telegram (wizard)"
+    echo " 7)  Jadwal backup otomatis (menit/jam)"
+    echo " 8)  Backup SEKARANG"
+    echo " 9)  Restore dari R2"
+    echo " 10) Status"
+    echo " 11) Bantuan bot Telegram"
+    echo " 0)  Keluar"
+    read -rp "Pilih [0-11]: " choice
     case $choice in
-      1) do_setup ;;
-      2) do_backup; _tg_notify "✅ Backup OK — $(date '+%d %b %Y %H:%M') — $(hostname)" ;;
-      3) read -rp "RESTORE menimpa state + DB Marzban dari R2. Yakin? (y/N): " c
+      1) read -rp "Username: " u
+         read -rp "Durasi (hari, kosong=30): " d; d="${d:-30}"
+         [[ -n $u ]] && do_add "$u" "$d" || log "batal — username kosong" ;;
+      2) read -rp "Hapus user: " u
+         read -rp "HAPUS $u? (y/N): " c
+         [[ $c == [yY]* ]] && [[ -n $u ]] && do_del "$u" || echo "batal" ;;
+      3) read -rp "User: " u
+         read -rp "Tambah hari: " d
+         [[ -n $u && -n $d ]] && do_set "$u" --add-days "$d" || echo "batal" ;;
+      4) do_list ;;
+      5) read -rp "User: " u
+         [[ -n $u ]] && do_show "$u" ;;
+      6) do_setup ;;
+      7) echo "Format interval (masuk cron):"
+         echo "  30m → tiap 30 menit    6j → tiap 6 jam    0 → tiap hari 03:03"
+         read -rp "BACKUP_INTERVAL [${BACKUP_INTERVAL:-0}]: " iv; iv="${iv:-${BACKUP_INTERVAL:-0}}"
+         python3 - "$iv" <<'PY'
+import re, sys
+iv = sys.argv[1].strip()
+if iv in ("0", ""):
+    print('BACKUP_INTERVAL="0"')
+elif re.fullmatch(r'[1-9][0-9]*m', iv):
+    n = int(iv[:-1]); assert 1 <= n <= 59, "menit 1-59"
+    print(f'BACKUP_INTERVAL="{n}m"')
+elif re.fullmatch(r'[1-9][0-9]*j', iv):
+    h = int(iv[:-1]); assert 1 <= h <= 23, "jam 1-23"
+    print(f'BACKUP_INTERVAL="{h}j"')
+elif re.fullmatch(r'[1-9][0-9]*', iv):
+    n = int(iv); assert 1 <= n <= 59, "menit 1-59"
+    print(f'BACKUP_INTERVAL="{n}m"')
+else:
+    sys.exit("format salah — pakai 30m / 6j / 0")
+PY
+         if [[ $? -eq 0 ]]; then
+           _conf_set BACKUP_INTERVAL "$iv"
+           BACKUP_INTERVAL="$iv"
+           apply_backup_cron
+         fi ;;
+      8) do_backup; _tg_notify "✅ Backup OK — $(date '+%d %b %Y %H:%M') — $(hostname)" ;;
+      9) read -rp "RESTORE menimpa state + DB Marzban dari R2. Yakin? (y/N): " c
          [[ $c == [yY]* ]] && { do_restore; _tg_notify "✅ Restore OK — $(date '+%d %b %Y %H:%M') — $(hostname)"; } || echo "batal" ;;
-      4) do_status ;;
+      10) do_status ;;
+      11) echo "Perintah bot: /backup  /restore  /status  /help"
+          echo "(hanya chat dari TG_CHAT_ID yang diproses)" ;;
       0|*) break ;;
     esac
   done
@@ -689,6 +810,8 @@ case $cmd in
   status)    do_status ;;
   setup)     do_setup "$@" ;;
   menu)      do_menu ;;
+  backup-cron) apply_backup_cron ;;
+  schedule)  do_schedule "$@" ;;
   edge-list)   edge_ctl '{"cmd":"list"}' ;;
   help|*)    grep -E "^# " "$0" | head -18 ;;
 esac

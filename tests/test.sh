@@ -301,9 +301,9 @@ CLI status | grep -q "MB-SSH STATUS"; check $? "status: output"
 CLI setup "" "" "123:FAKE_TOKEN_TEST" "999" >/dev/null 2>&1
 ! grep -q 'TG_BOT_TOKEN="123:FAKE_TOKEN_TEST"' $T/conf/mb.conf; check $? "setup: token invalid ditolak (conf bersih)"
 # menu: item status + keluar (input dipipe)
-OUT=$(printf '4\n0\n' | CLI menu 2>/dev/null)
+OUT=$(printf '10\n0\n' | CLI menu 2>/dev/null)
 echo "$OUT" | grep -q "MB-SSH MENU"; check $? "menu: tampil"
-echo "$OUT" | grep -q "MB-SSH STATUS"; check $? "menu: item 4 (status) jalan"
+echo "$OUT" | grep -q "MB-SSH STATUS"; check $? "menu: item 10 (status) jalan"
 # bot handler (unit, tanpa network)
 HELP=$(python3 -c "
 import importlib.util
@@ -344,6 +344,45 @@ MB_SSH_CONF=$T/conf/mb.conf MB_SSH_USERS=$T/state/users.json MB_SSH2_BIN=$V2/mb-
 python3 -c "import json; assert 'texp' in json.load(open('$T/state/users.json'))" 2>/dev/null
 check $? "cleanup: AUTO_DELETE_EXPIRED=0 → akun expired dipertahankan (lock, bisa extend)"
 CLI del texp >/dev/null 2>&1
+
+echo "=== 7f. JADWAL BACKUP (schedule CLI + bot) ==="
+# _cron_spec pure (dari variabel mb.conf yang diset sementara)
+python3 - "$T/conf/mb.conf" <<'PY'
+import json, sys
+# tulis BACKUP_INTERVAL ke conf test (simulasi set)
+p = sys.argv[1]
+c = open(p).read()
+for k, v in [("BACKUP_INTERVAL", "30m")]:
+    import re
+    if re.search(rf"^{k}=", c, re.M):
+        c = re.sub(rf"^{k}=.*$", f'{k}="{v}"', c, flags=re.M)
+    else:
+        c += f'\n{k}="{v}"\n'
+open(p, "w").write(c)
+PY
+SPEC=$(CLI backup-cron 2>/dev/null | grep -o '\*/30 \* \* \* \*')
+[[ -n $SPEC ]] && [[ $(crontab -l 2>/dev/null | grep -c "mb-ssh2 backup") -eq 1 ]]; check $? "jadwal: 30m → cron */30 (crontab 1 baris)"
+[[ $(crontab -l 2>/dev/null | grep "mb-ssh2 backup" | grep -c "*/30") -eq 1 ]]; check $? "jadwal: crontab memuat */30"
+# reset ke 0 (default) + hapus dari conf test
+python3 - "$T/conf/mb.conf" <<'PY'
+import re, sys
+p = sys.argv[1]
+c = open(p).read()
+c = re.sub(r'^BACKUP_INTERVAL=.*$', 'BACKUP_INTERVAL="0"', c, flags=re.M)
+open(p, "w").write(c)
+PY
+CLI schedule 0 >/dev/null 2>&1
+[[ $(crontab -l 2>/dev/null | grep "mb-ssh2 backup" | grep -c "3 3") -eq 1 ]]; check $? "jadwal: reset 0 → cron 3 3 (default)"
+# bot /schedule → parse + eksekusi CLI
+python3 -c "
+import importlib.util
+spec = importlib.util.spec_from_file_location('mbtg', '$V2/mb-tgbot.py')
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+# /help memuat /schedule
+h = m.handle('/help', {})
+assert '/schedule' in h
+print('help-schedule-OK')" 2>/dev/null | grep -q "help-schedule-OK"
+check $? "bot: /help memuat /schedule"
 
 echo "=== 8. cleanup ==="
 CLI del test1 >/dev/null 2>&1

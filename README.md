@@ -67,26 +67,39 @@ mb-ssh2 status                                      # ringkasan config + user + 
 ## Menu CLI & Bot Telegram
 **Setup sekali** (di VPS node):
 ```bash
-mb-ssh2 setup    # wizard interaktif:
-                 #  [1/2] R2  → nama remote rclone + path (divalidasi dulu)
-                 #  [2/2] Bot → token @BotFather + chat id (divalidasi via getMe)
-mb-ssh2 menu     # menu berjalan: backup/restore/status kapan saja
-mb-ssh2 status   # cek: R2 set? bot jalan? user berapa?
+mb-ssh2 menu     # menu bernomor — semua di sini:
+                 #  1) Tambah akun SSH              7) Jadwal backup (menit/jam)
+                 #  2) Hapus akun                  8) Backup sekarang
+                 #  3) Perpanjang akun             9) Restore dari R2
+                 #  4) Daftar akun                 10) Status
+                 #  5) Detail akun                 11) Bantuan bot
+                 #  6) Setup R2 + bot (sekali)
+mb-ssh2 status   # cek singkat: R2 set? bot jalan? jadwal? user berapa?
 ```
-Non-interaktif (script): `mb-ssh2 setup <R2_REMOTE> [R2_PATH] <TG_BOT_TOKEN> <TG_CHAT_ID>`
-Token invalid = **ditolak**, tidak dituliskan ke config.
+Non-interaktif (script/bot): 
+- `mb-ssh2 setup <R2_REMOTE> [R2_PATH] <TG_BOT_TOKEN> <TG_CHAT_ID>` — token invalid = ditolak
+- `mb-ssh2 schedule 30 m` / `6 j` / `0` — set jadwal backup otomatis
+
+**Jadwal backup otomatis** (menit/jam, tersimpan di mb.conf `BACKUP_INTERVAL`):
+| Setting | Cron | Efek |
+|---|---|---|
+| `0` | `3 3 * * *` | tiap hari 03:03 (default) |
+| `30 m` | `*/30 * * * *` | tiap 30 menit |
+| `6 j` | `0 */6 * * *` | tiap 6 jam |
+
+Set dari menu (item 7), CLI `mb-ssh2 schedule`, atau bot ` /schedule 30 m` — semua idempotent, tanpa restart.
 
 **Bot Telegram** (setelah `setup`): service `mb-tgbot` aktif (systemd, restart on-failure).
 Kirim ke bot:
 | Perintah | Aksi di node |
 |---|---|
 | `/backup` | `mb-ssh2 backup` — balas = output asli CLI |
+| `/schedule 30 m` | backup tiap 30 menit (`6 j` = jam, `0` = harian 03:03) |
 | `/restore` | `mb-ssh2 restore` (menimpa state + DB Marzban) |
-| `/status` | node + jumlah user + config R2 |
+| `/status` | node + jumlah user + config R2 + jadwal |
 | `/help` | daftar perintah |
 
 Keamanan: hanya chat_id di `TG_CHAT_ID` (allow-list, boleh koma-separated) yang diproses.
-Cron 03:03 tetap jalan — hasilnya juga masuk log `/var/log/mb-ssh2-backup.log`.
 
 ## Backup & Restore (otomatis)
 **Cron** (pasang `run.sh`): `3 3 * * *` → `mb-ssh2 backup` → `rclone copy` ke R2

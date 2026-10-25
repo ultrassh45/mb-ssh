@@ -72,9 +72,12 @@ def handle(text, conf):
     cmd = t.split()[0].lower() if t else ""
     if cmd in ("/help", "help", "?"):
         return ("Perintah:\n"
-                "/backup  — backup ke R2 sekarang\n"
-                "/restore — restore dari R2 (menimpa state + DB Marzban)\n"
-                "/status  — status node + config backup\n\n"
+                "/backup        — backup ke R2 sekarang\n"
+                "/schedule N m  — backup tiap N menit (contoh: /schedule 30 m)\n"
+                "/schedule N j  — backup tiap N jam (contoh: /schedule 6 j)\n"
+                "/schedule 0    — backup tiap hari 03:03 (default)\n"
+                "/restore       — restore dari R2 (menimpa state + DB Marzban)\n"
+                "/status        — status node + config backup\n\n"
                 "Balasan saya = output asli dari CLI node.")
     if cmd in ("/backup", "backup"):
         rc, out = run_cli(["backup"])
@@ -82,6 +85,13 @@ def handle(text, conf):
     if cmd in ("/restore", "restore"):
         rc, out = run_cli(["restore"])
         return ("[OK] RESTORE\n\n" if rc == 0 else "[GAGAL] RESTORE (rc=%d)\n\n" % rc) + fmt(out)
+    if cmd in ("/schedule", "schedule"):
+        # /schedule 30 m → tiap 30 menit | /schedule 6 j → tiap 6 jam | /schedule 0 → hari 03:03
+        args = t.split()[1:]
+        n = args[0] if args else ""
+        unit = args[1] if len(args) > 1 else ""
+        rc, out = run_cli(["schedule", n, unit])
+        return ("[OK] JADWAL\n\n" if rc == 0 else "[GAGAL] JADWAL (rc=%d)\n\n" % rc) + fmt(out)
     if cmd in ("/status", "status"):
         try:
             nu = len(json.load(open(os.path.join(STATE, "users.json"))))
