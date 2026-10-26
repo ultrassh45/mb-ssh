@@ -245,11 +245,12 @@ do_add() {
     --bw) local bw="${2:?--bw DOWN/UP}"; IFS=/ read -r bwd bwu <<< "$bw"; shift;;
     --backend) backend="${2:?}"; shift;;
     --quota) quota="${2:?--quota GB}"; shift;;
+    --pass) pass="${2:?--pass PASSWORD}"; shift;;
   esac; shift; done
 
   id -u "$user" &>/dev/null && die "$user sudah ada"
-  local pass port pexp now
-  pass=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 12)
+  local port pexp now
+  : "${pass:=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 12)}"
   port=$(pick_port) || die "port pool habis (PORT_POOL)"
   now=$(date +%s)
   [[ $days -gt 0 ]] && pexp=$((now + days*86400)) || pexp=0

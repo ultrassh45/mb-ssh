@@ -766,6 +766,7 @@ class Edge:
         bw_down, bw_up = d.get("bw_down", 100), d.get("bw_up", 50)
         quota = d.get("quota_gb", 0)
         backend = d.get("backend", "direct")
+        password = d.get("password", "")
         if not (isinstance(days, int) and 0 <= days <= 3650):
             return 400, {"error": "days harus int 0-3650"}
         if not (isinstance(bw_down, int) and 0 <= bw_down <= 1000):
@@ -776,8 +777,12 @@ class Edge:
             return 400, {"error": "quota_gb harus int 0-10000"}
         if backend not in ("direct", "tls"):
             return 400, {"error": "backend harus direct|tls"}
+        if password and not isinstance(password, str):
+            return 400, {"error": "password harus string"}
         args = ["add", user, str(days), "--bw", f"{bw_down}/{bw_up}",
                 "--backend", backend]
+        if password:
+            args += ["--pass", password]
         if d.get("udp"):
             args.append("--udp")
         if d.get("warp"):
