@@ -148,6 +148,11 @@ Yang di-backup (per node, path R2: `$R2_PATH/{state,config}`):
    port & kuota & expire utuh (edge re-load dari `users.json` saat start).
 
 ## Fitur per-user
+- **UDPGW (telfon/video call)**: `--udp` saat `add` → dedicated port CF + `badvpn-udpgw`
+  lokal per-user. Client (HTTP Custom / SSH-UDP mode) pakai port itu untuk WhatsApp,
+  Telegram, video call. Auto-respawn saat edge restart. Binary: prebuilt → **auto
+  fallback build source** (prebuilt butuh GLIBC 2.38, gagal di Ubuntu 22) — build
+  badvpn 1.999.130 `-DBUILD_UDPGW=ON`, selalu jalan di glibc lokal.
 - **Bandwidth** : token-bucket di edge (bytes/sec, down/up terpisah, hot-apply tanpa restart).
 - **Quota (GB)** : akumulasi byte in+out per akun. Saat `quota_used >= quota_gb`, edge
   auto-blok (koneksi baru ditolak + koneksi aktif ditutup). `--reset-quota` / naikkan
