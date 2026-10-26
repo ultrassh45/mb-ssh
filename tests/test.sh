@@ -13,10 +13,11 @@ check(){ # check <desc> <expr-result-0-is-ok>
 echo "=== 0. syntax ==="
 bash -n $V2/mb-ssh2.sh && python3 -m py_compile $V2/mb-edge.py; check $? "syntax semua file"
 
-# cleanup proses lama di port test
-for p in 29999 29001 29002 29003 29499; do
+# cleanup proses lama di port test + user test yang mungkin tersisa dari run yang diterminasi paksa
+for p in 29999 29001 29002 29003 29004 29005 29006 29007 29499; do
   for pid in $(ss -ltnp 2>/dev/null | grep ":$p " | grep -oP 'pid=\K[0-9]+' | sort -u); do kill $pid 2>/dev/null; done
 done
+for u in test1 texp tuser_api; do userdel -r "$u" 2>/dev/null; done
 pkill -f "mbtest3" 2>/dev/null
 sleep 0.5
 rm -rf $T; mkdir -p $T/state $T/conf
@@ -78,6 +79,10 @@ CLI add test1 30 >/dev/null 2>&1; RC=$?
 check $RC "add test1 30"
 PORT1=$(python3 -c "import json; print(json.load(open('$T/state/users.json'))['test1']['port'])")
 echo "  (port test1 = $PORT1)"
+
+# client-info memuat port list, dikelompokkan TLS/nonTLS
+R=$(grep -A2 "Port List" "$T/state/client-test1.txt" 2>/dev/null | head -3)
+echo "$R" | grep -q "TLS" && echo "$R" | grep -q "nonTLS"; check $? "port list TLS/nonTLS di client-info"
 
 R=$(python3 -c "
 import socket

@@ -59,7 +59,7 @@ log() { echo "[mb-ssh2 $(date '+%F %T')] $*"; }
 die() { echo "[mb-ssh2] ERROR: $*" >&2; exit 1; }
 
 # pool port CF (alternate; 80/443 = Marzban, 22 = admin)
-PORT_POOL="${PORT_POOL:-8080 8880 2052 2082 2086 2095 2053 2083 2087 2096 8443}"
+PORT_POOL="${PORT_POOL:-443 80 8080 8880 2052 2082 2086 2095 2053 2083 2087 2096 8443}"
 
 # ---------- edge control client ----------
 edge_ctl() { # edge_ctl <json>
@@ -171,12 +171,26 @@ Node        : $DOMAIN
 User        : $user
 Password    : $pass
 Expire      : $expstr
-SSH Port    : $port      (dedicated, via Cloudflare)
+SSH Port    : $port      (via Cloudflare)
 Bandwidth   : ${bwd}M down / ${bwu}M up
 Quota       : $qstr
 EOF
+  # port pool lengkap, dikelompokkan TLS/nonTLS (443 & 80 utama, sisanya alternatif)
+  local tls_p="443"; local n_tls_p="80"; local p
+  for p in $PORT_POOL; do
+    case "$p" in
+      443|2053|2083|2087|8443|2096) [[ "$p" != 443 ]] && tls_p="$tls_p $p";;
+      80|8080|8880|2052|2082|2086|2095) [[ "$p" != 80 ]] && n_tls_p="$n_tls_p $p";;
+    esac
+  done
+  cat >> "$STATE_DIR/client-$user.txt" <<EOF
+Port List   :
+  TLS       : $tls_p
+  nonTLS    : $n_tls_p
+  (semua port aktif via Cloudflare — pilih salah satu; $port = port akun ini)
+EOF
   [[ -n $udp ]] && cat >> "$STATE_DIR/client-$user.txt" <<EOF
-UDPGW Port  : $udp      (dedicated, via Cloudflare)
+UDPGW       : $udp      (via Cloudflare)
 EOF
   [[ -n $wpt ]] && echo "WARP      : active" >> "$STATE_DIR/client-$user.txt"
   cat >> "$STATE_DIR/client-$user.txt" <<EOF
