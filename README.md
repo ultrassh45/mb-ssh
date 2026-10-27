@@ -31,15 +31,15 @@ legacy/v1/                  ← versi lama (Marzban-sync), arsip
 
 ## Install (node baru)
 ```bash
-git clone <repo> /opt/mb-ssh && cd /opt/mb-ssh
+git clone https://github.com/ultrassh45/mb-ssh.git /opt/mb-ssh
+cd /opt/mb-ssh
 bash run.sh                  # + --warp utk exit IP Cloudflare per-user
 ```
-One-liner (alternatif):
-```bash
-curl -fsSL <repo>/raw/main/run.sh | bash
-```
+> Repo **PRIVATE** — perlu akses (PAT/token) utk clone. Satu repo = satu node (atau
+> satu source utk semua node kamu; config per-node ada di `/etc/mb-ssh2/*`, tak
+> ditimpa update).
 
-## Update (node live — idempotent)
+Update node (idempotent, config user tak tersentuh):
 ```bash
 cd /opt/mb-ssh && git pull && bash run.sh
 ```

@@ -2,7 +2,7 @@
 # mb-ssh — installer node VPN (Marzban) + SSH product (edge + dropbear + stunnel + udpgw)
 #
 # One-liner:
-#   curl -fsSL https://<host>/mb-ssh/run.sh | bash
+#   bash <(curl -fsSL https://raw.githubusercontent.com/ultrassh45/mb-ssh/main/run.sh)
 # Lokal:
 #   bash run.sh [--warp] [--no-marzban]
 #
@@ -15,7 +15,22 @@
 
 set -euo pipefail
 
+# ---------- self-bootstrap (one-liner via curl → clone & re-exec) ----------
+REPO_URL="${REPO_URL:-https://github.com/ultrassh45/mb-ssh.git}"
+REPO_BRANCH="${REPO_BRANCH:-main}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "$ROOT" != /opt/mb-ssh-src ]] && [[ ! -f "$ROOT/.git" && ! -d "$ROOT/.git" ]]; then
+  # dijalankan lewat pipa curl (bukan clone lokal) → self-install repo
+  SRC=/opt/mb-ssh-src
+  if [[ ! -d "$SRC/.git" ]]; then
+    command -v git >/dev/null || { apt-get update -q && apt-get install -y -q git; }
+    git clone -q --depth 1 -b "$REPO_BRANCH" "$REPO_URL" "$SRC"
+  else
+    git -C "$SRC" fetch -q origin "$REPO_BRANCH" && git -C "$SRC" reset -q --hard "origin/$REPO_BRANCH"
+  fi
+  exec bash "$SRC/run.sh" "$@"
+fi
+
 log() { echo -e "\033[1;32m[mb-ssh]\033[0m $*"; }
 die() { echo -e "\033[1;31m[mb-ssh]\033[0m $*" >&2; exit 1; }
 
