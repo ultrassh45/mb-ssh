@@ -768,7 +768,7 @@ do_status() {
   nu=$(python3 -c "import json; print(len(json.load(open('$USERS_JSON'))))" 2>/dev/null || echo "?")
   echo "=== MB-SSH STATUS ==="
   echo "Node      : $(hostname)"
-  echo "User SSH  : $nu akun"
+  echo "Akun      : $(_count_all)"
   echo "R2_REMOTE : ${R2_REMOTE:-<belum diset>}"
   echo "R2_PATH   : ${R2_PATH}"
   echo "Backup    : ${BACKUP_INTERVAL:-0} (0 = tiap hari 03:03)"

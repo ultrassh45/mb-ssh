@@ -121,7 +121,13 @@ s.sendall(b'{\"cmd\":\"flush\"}\n')
 print(s.recv(1024).decode().strip())
 " >/dev/null
 sleep 0.2
-INB=$(python3 -c "import json; print(json.load(open('$T/state/stats.json'))['test1']['in'])")
+# poll sampai stats in >= 200KB (race-safe)
+INB=0
+for _i in 1 2 3 4 5; do
+  INB=$(python3 -c "import json; print(json.load(open('$T/state/stats.json'))['test1']['in'])")
+  [[ $INB -ge 200000 ]] && break
+  sleep 0.4
+done
 [[ $INB -ge 200000 ]]; check $? "stats.json in >= 200KB (=$INB)"
 
 echo "=== 5. QUOTA: 0.001GB (~1MB) → block → reject → reset ==="
@@ -137,9 +143,12 @@ s.close()" 2>/dev/null
 sleep 0.5
 B=$(python3 -c "import json; print(json.load(open('$T/state/users.json'))['test1'].get('quota_gb',0))")
 [[ $B == "0.001" ]]; check $? "state quota_gb=0.001"
-R=$(python3 -c "
+# --- poll sampai quota rejected (race-safe) ---
+R=""
+for _i in 1 2 3 4 5 6; do
+  R=$(python3 -c "
 import socket
-s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1',$PORT1))
+s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',$PORT1))
 s.sendall(b'should-be-rejected')
 try:
     d = s.recv(1024)
@@ -147,6 +156,9 @@ try:
 except socket.timeout:
     print('TIMEOUT')
 " 2>/dev/null)
+  [[ $R != "ECHO:should-be-rejected" ]] && break
+  sleep 0.5
+done
 [[ $R != "ECHO:should-be-rejected" ]]; check $? "koneksi baru ditolak saat quota exceeded (resp=$R)"
 CLI set test1 --reset-quota >/dev/null 2>&1
 R=$(python3 -c "
