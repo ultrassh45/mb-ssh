@@ -31,8 +31,8 @@ legacy/v1/                  ← versi lama (Marzban-sync), arsip
 
 ## Install (node baru)
 ```bash
-git clone https://github.com/ultrassh45/mb-ssh.git /opt/mb-ssh-src
-cd /opt/mb-ssh-src
+git clone https://github.com/ultrassh45/mb-ssh.git /root/mb-ssh
+cd /root/mb-ssh
 bash run.sh                  # + --warp utk exit IP Cloudflare per-user
 ```
 > Repo **PRIVATE** — perlu akses (PAT/token) utk clone. Satu repo = satu node (atau
@@ -41,7 +41,7 @@ bash run.sh                  # + --warp utk exit IP Cloudflare per-user
 
 Update node (idempotent, config user tak tersentuh):
 ```bash
-cd /opt/mb-ssh-src && git pull && bash run.sh
+cd /root/mb-ssh && git pull && bash run.sh
 ```
 - Config existing (`/etc/mb-ssh2/*`) TIDAK ditimpa
 - User existing TIDAK hilang (state: `/var/lib/mb-ssh/users.json`)
@@ -51,7 +51,7 @@ cd /opt/mb-ssh-src && git pull && bash run.sh
 ```bash
 mb-ssh2 set-domain     # prompt input domain + validasi pointing + cert
 ```
-> Membutuhkan repo di `/opt/mb-ssh-src` (SRC_DIR). Kalau repo di path lain,
+> Membutuhkan repo di `/root/mb-ssh` (SRC_DIR default). Kalau di path lain,
 > set `SRC_DIR=/path/repo` di `/etc/mb-ssh2/mb.conf`.
 
 ## Operasional

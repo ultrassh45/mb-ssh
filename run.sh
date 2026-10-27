@@ -18,10 +18,11 @@ set -euo pipefail
 # ---------- self-bootstrap (one-liner via curl → clone & re-exec) ----------
 REPO_URL="${REPO_URL:-https://github.com/ultrassh45/mb-ssh.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
+SRC_DIR="${SRC_DIR:-/root/mb-ssh}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ "$ROOT" != /opt/mb-ssh-src ]] && [[ ! -f "$ROOT/.git" && ! -d "$ROOT/.git" ]]; then
+if [[ "$ROOT" != "$SRC_DIR" ]] && [[ ! -f "$ROOT/.git" && ! -d "$ROOT/.git" ]]; then
   # dijalankan lewat pipa curl (bukan clone lokal) → self-install repo
-  SRC=/opt/mb-ssh-src
+  SRC="$SRC_DIR"
   if [[ ! -d "$SRC/.git" ]]; then
     command -v git >/dev/null || { apt-get update -q && apt-get install -y -q git; }
     git clone -q --depth 1 -b "$REPO_BRANCH" "$REPO_URL" "$SRC"
