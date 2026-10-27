@@ -79,11 +79,9 @@ mkdir -p /etc/mb-ssh2 /var/lib/mb-ssh /run/mb-ssh
 # config (jangan timpa yang sudah ada = idempotent upgrade)
 [[ -f /etc/mb-ssh2/edge.json ]] || install -m 644 "$ROOT/config/edge.json" /etc/mb-ssh2/edge.json
 [[ -f /etc/mb-ssh2/mb.conf ]]   || install -m 644 "$ROOT/config/mb.conf"   /etc/mb-ssh2/mb.conf
-# domain auto-detect saat pertama
-if grep -q '^DOMAIN=""' /etc/mb-ssh2/mb.conf 2>/dev/null; then
-  DOM=$(hostname -I 2>/dev/null | awk '{print $1}')
-  sed -i "s/^DOMAIN=\"\"/DOMAIN=\"$DOM\"/" /etc/mb-ssh2/mb.conf
-fi
+# domain: input manual + validasi pointing (04) — auto-detect IP di dalamnya.
+# lewati kalau DOMAIN sudah terisi selain IP default (idempotent).
+bash "$ROOT/install/04-domain.sh" || log "konfig domain dilewati (lanjut IP)"
 # API token (generate sekali) + flag warp di edge.json
 python3 - "$WARP" <<'PY'
 import json, os, re, secrets, sys
