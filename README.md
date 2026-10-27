@@ -67,21 +67,27 @@ mb-ssh2 del budi
 mb-ssh2 backup                                      # backup ssh state + Marzban DB + config → R2
 mb-ssh2 restore                                     # pull dari R2 → restore ssh + Marzban
 mb-ssh2 setup                                       # wizard: set R2 + bot Telegram (tulis mb.conf, enable svc)
-mb-ssh2 menu                                        # menu interaktif (setup/backup/restore/status)
-mb-ssh2 status                                      # ringkasan config + user + log backup
+mb-ssh2 menu                                        # menu interaktif (setup/backup/restore/status/…)
+mb-ssh2 status                                      # ringkasan: akun per service + config + log backup
+mb-ssh2 svcheck                                     # status service systemd + versi dropbear aktif
+mb-ssh2 set-domain                                  # ganti domain node (validasi pointing + cert)
 ```
 
 ## Menu CLI & Bot Telegram
-**Setup sekali** (di VPS node):
+**Menu CLI** (nomor lengkap):
 ```bash
-mb-ssh2 menu     # menu bernomor — semua di sini:
-                 #  1) Tambah akun SSH              7) Jadwal backup (menit/jam)
-                 #  2) Hapus akun                  8) Backup sekarang
-                 #  3) Perpanjang akun             9) Restore dari R2
-                 #  4) Daftar akun                 10) Status
-                 #  5) Detail akun                 11) Bantuan bot
-                 #  6) Setup R2 + bot (sekali)
-mb-ssh2 status   # cek singkat: R2 set? bot jalan? jadwal? user berapa?
+mb-ssh2 menu     # header tampil total akun per service:
+               #   Akun: ssh=N vless=N vmess=N trojan=N   (SSH dari users.json,
+               #                                          VLESS/VMess/Trojan dari Marzban db)
+               #  1) Tambah akun SSH       8) Backup sekarang
+               #  2) Hapus akun            9) Restore dari R2
+               #  3) Perpanjang akun      10) Status
+               #  4) Daftar akun          11) Bantuan bot
+               #  5) Detail akun          12) Update script + auto-rollback
+               #  6) Setup R2 + bot        13) Ganti versi dropbear
+               #  7) Jadwal backup         14) Cek status service + dropbear
+mb-ssh2 status   # cek singkat: akun per service + R2 set? bot jalan? jadwal?
+mb-ssh2 svcheck  # status systemd mb-edge/dropbear/stunnel/bot/marzban + versi dropbear
 ```
 Non-interaktif (script/bot): 
 - `mb-ssh2 setup <R2_REMOTE> [R2_PATH] <TG_BOT_TOKEN> <TG_CHAT_ID>` — token invalid = ditolak
@@ -103,7 +109,7 @@ Kirim ke bot:
 | `/backup` | `mb-ssh2 backup` — balas = output asli CLI |
 | `/schedule 30 m` | backup tiap 30 menit (`6 j` = jam, `0` = harian 03:03) |
 | `/restore` | `mb-ssh2 restore` (menimpa state + DB Marzban) |
-| `/status` | node + jumlah user + config R2 + jadwal |
+| `/status` | node + total akun per service (ssh/vless/vmess/trojan) + R2 + jadwal |
 | `/help` | daftar perintah |
 
 Keamanan: hanya chat_id di `TG_CHAT_ID` (allow-list, boleh koma-separated) yang diproses.

@@ -93,16 +93,31 @@ def handle(text, conf):
         rc, out = run_cli(["schedule", n, unit])
         return ("[OK] JADWAL\n\n" if rc == 0 else "[GAGAL] JADWAL (rc=%d)\n\n" % rc) + fmt(out)
     if cmd in ("/status", "status"):
+        # total per service (reuse CLI status: 'Akun: ssh=N vless=N vmess=N trojan=N')
+        total = ""
         try:
-            nu = len(json.load(open(os.path.join(STATE, "users.json"))))
+            # pars baris 'Akun:' dari output mb-ssh2 status
+            out = subprocess.run(
+                [CLI, "status"], capture_output=True, text=True, timeout=15
+            ).stdout
+            for ln in out.splitlines():
+                if ln.startswith("Akun"):
+                    total = ln.split(":", 1)[1].strip()
+                    break
         except Exception:
-            nu = "?"
+            total = ""
+        if not total:
+            try:
+                nu = len(json.load(open(os.path.join(STATE, "users.json"))))
+                total = "ssh=%s" % nu
+            except Exception:
+                total = "ssh=?"
         return ("Node   : %s\n"
-                "User SSH: %s\n"
+                "Akun   : %s\n"
                 "R2     : %s\n"
                 "Path   : %s\n"
                 "Bot    : tersambung (chat allow-list)") % (
-                    os.uname().nodename, nu,
+                    os.uname().nodename, total,
                     conf.get("R2_REMOTE") or "<belum diset>",
                     conf.get("R2_PATH") or "-")
     return "Perintah tidak dikenal: %s\nKetik /help" % (t or "(kosong)")
