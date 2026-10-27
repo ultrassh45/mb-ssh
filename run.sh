@@ -131,6 +131,25 @@ fi
 # cron backup: idempotent — tulis ulang baris sesuai BACKUP_INTERVAL di mb.conf
 /usr/local/bin/mb-ssh2 backup-cron
 
+# ---------- 4b. Update script: set REPO_URL + pasang hook login-check ----------
+# agar saat admin login SSH, muncul "UPDATE TERSEDIA + rincian + Y/N" & update
+# auto-rollback kalau gagal. Idempotent: hanya set kalau kosong, hook sekali.
+source /etc/mb-ssh2/mb.conf 2>/dev/null || true
+if [[ -z "${REPO_URL:-}" ]]; then
+  sed -i "/^REPO_URL=/d" /etc/mb-ssh2/mb.conf
+  printf 'REPO_URL="%s"\n' "https://github.com/ultrassh45/mb-ssh.git" >> /etc/mb-ssh2/mb.conf
+  grep -q '^REPO_BRANCH=' /etc/mb-ssh2/mb.conf || printf 'REPO_BRANCH="main"\n' >> /etc/mb-ssh2/mb.conf
+  log "REPO_URL diset — update script aktif (git pull && bash run.sh)"
+fi
+# pasang hook login-check ke /root/.bashrc (dan user admin saat itu) — idempotent
+MB_TEST=1 /usr/local/bin/mb-ssh2 _install_login_hook root 2>/dev/null \
+  || grep -q "login-check" /root/.bashrc || cat >> /root/.bashrc <<'EOF'
+
+# mb-ssh: cek update script saat login (Y = update, N = lewati)
+[ -t 0 ] && [ -x /usr/local/bin/mb-ssh2 ] && /usr/local/bin/mb-ssh2 login-check
+EOF
+log "[ok] hook login-check /root/.bashrc (update prompt saat login)"
+
 echo
 echo "============================================================"
 echo " NODE SIAP"
