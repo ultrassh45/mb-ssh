@@ -112,12 +112,23 @@ def handle(text, conf):
                 total = "ssh=%s" % nu
             except Exception:
                 total = "ssh=?"
+        # status service (kalau systemctl ada)
+        svc = ""
+        try:
+            r = subprocess.run(["systemctl", "is-active", "mb-edge", "dropbear-client", "stunnel", "mb-tgbot", "marzban"],
+                               capture_output=True, text=True, timeout=10)
+            names = ["mb-edge", "dropbear-client", "stunnel", "mb-tgbot", "marzban"]
+            acts = r.stdout.split()
+            svc = " / ".join("%s:%s" % (names[i], acts[i] if i < len(acts) else "?") for i in range(len(names)))
+        except Exception:
+            svc = "n/a"
         return ("Node   : %s\n"
                 "Akun   : %s\n"
+                "Servis : %s\n"
                 "R2     : %s\n"
                 "Path   : %s\n"
                 "Bot    : tersambung (chat allow-list)") % (
-                    os.uname().nodename, total,
+                    os.uname().nodename, total, svc,
                     conf.get("R2_REMOTE") or "<belum diset>",
                     conf.get("R2_PATH") or "-")
     return "Perintah tidak dikenal: %s\nKetik /help" % (t or "(kosong)")

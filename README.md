@@ -25,7 +25,7 @@ systemd/
   dropbear-client.service
   mb-tgbot.service          ← enable otomatis setelah `mb-ssh2 setup` (token valid)
 tests/
-  test.sh                     ← suite functional (26 check, port 29xxx, isolated)
+  test.sh                     ← suite functional (57 check, port 29xxx, isolated)
 legacy/v1/                  ← versi lama (Marzban-sync), arsip
 ```
 
@@ -224,8 +224,8 @@ ssh -p <port> budi@domain
 # TLS flavor: stunnel ProxyCommand → domain:<port> (import cert /etc/mb-ssh2/cert.pem)
 ```
 
-## Verifikasi (2026-10-25)
-Suite test di `tests/test.sh` — **26/26 pass**:
+## Verifikasi (2026-10-26)
+Suite test di `tests/test.sh` — **57/57 pass** (poll-based, race-safe):
 - Relay dual-direction · hot add/remove · rate limit 5 Mbps → terukur 4.92
 - **Restore**: kill+restart edge → user port & relay auto-pulihkan (P0)
 - **Stats**: byte in terhitung di `stats.json`
