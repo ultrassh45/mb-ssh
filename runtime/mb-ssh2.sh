@@ -1024,16 +1024,68 @@ do_dropbear() {
   die "subcommand dropbear tidak dikenal: '$action' (list/set/status)"
 }
 
+_count_all() {
+  # total akun per service: SSH (users.json) + VLESS/VMess/Trojan (Marzban db)
+  # → baris "ssh=3 vless=5 vmess=2 trojan=1" (0 utk kosong; marzban absent → 0)
+  python3 - "$USERS_JSON" /opt/marzban/db.sqlite3 <<'PY'
+import json, os, sys
+out = {}
+try:
+    out["ssh"] = len(json.load(open(sys.argv[1])))
+except Exception:
+    out["ssh"] = 0
+# Marzban db → hitung per protocol
+db = sys.argv[2]
+if os.path.exists(db):
+    try:
+        import sqlite3
+        con = sqlite3.connect(db)
+        rows = con.execute("SELECT protocol, COUNT(*) FROM users GROUP BY protocol")
+        for proto, cnt in rows:
+            out[proto.strip().lower()] = cnt
+        con.close()
+    except Exception:
+        pass
+for proto in ("ssh", "vless", "vmess", "trojan"):
+    print(f"{proto}={out.get(proto, 0)}", end=" ")
+print()
+PY
+}
+
+do_svcheck() {
+  # 14) status service + versi dropbear aktif
+  echo "=== CEK STATUS SERVICE ==="
+  for svc in mb-edge dropbear-client stunnel mb-tgbot marzban; do
+    if command -v systemctl >/dev/null 2>&1; then
+      local act; act=$(systemctl is-active "$svc" 2>/dev/null || echo "n/a")
+      local en; en=$(systemctl is-enabled "$svc" 2>/dev/null || echo "?")
+      echo "  $svc  : $act (enabled=$en)"
+    else
+      echo "  $svc  : systemctl tidak ada"
+    fi
+  done
+  # versi dropbear aktif
+  local bin="${DROPBEAR_BIN:-/usr/local/bin/dropbear}"
+  echo "  dropbear aktif : $("$bin" -h 2>&1 | head -1 || echo '?')"
+  # versi tersedia lokal
+  echo "  versi build    : $(ls /opt/dropbear/dropbear-* 2>/dev/null | grep -oE 'dropbear-[0-9.]+' | tr '\n' ' ')"
+  # listen port SSH (22 admin, 22022 direct, 22443 tls)
+  echo "  listen (ss):"
+  (ss -ltnp 2>/dev/null | grep -E ":22022|:22443|:8000" | awk '{print "    "$4}' | head -6) || true
+  echo "  client-info : $STATE_DIR (per-akun .txt)"
+}
+
 do_menu() {
   local choice c u d
   while true; do
+    local counts; counts="$(_count_all)"
     echo ""
     echo "================ MB-SSH MENU ================"
     echo " R2  : ${R2_REMOTE:-<belum diset>}  (${R2_PATH})"
     echo " Bot : ${TG_BOT_TOKEN:+tersambung${TG_CHAT_ID:+ (chat $TG_CHAT_ID)}}${TG_BOT_TOKEN:-<belum diset>}"
     echo " Back: ${BACKUP_INTERVAL:-0} (0 = tiap hari 03:03)"
     echo " Upd : ${REPO_URL:+sumber git ✓}${REPO_URL:-<belum set — setup>}"
-    echo " User: $(python3 -c "import json; print(len(json.load(open('$USERS_JSON'))))" 2>/dev/null || echo 0) akun"
+    echo " Akun: $counts"
     echo "=============================================="
     echo " 1)  Tambah akun SSH"
     echo " 2)  Hapus akun SSH"
@@ -1048,8 +1100,9 @@ do_menu() {
     echo " 11) Bantuan bot Telegram"
     echo " 12) Update script + auto-rollback"
     echo " 13) Ganti versi dropbear (2019.78 default, bebas pilih)"
+    echo " 14) Cek status service (mb-edge/dropbear/stunnel/bot)"
     echo " 0)  Keluar"
-    read -rp "Pilih [0-13]: " choice
+    read -rp "Pilih [0-14]: " choice
     case $choice in
       1) read -rp "Username: " u
          read -rp "Durasi (hari, kosong=30): " d; d="${d:-30}"
@@ -1097,6 +1150,7 @@ PY
           echo "(hanya chat dari TG_CHAT_ID yang diproses)" ;;
       12) do_update ;;
       13) do_dropbear ;;
+      14) do_svcheck ;;
       0|*) break ;;
     esac
   done
@@ -1113,6 +1167,7 @@ case $cmd in
   backup)    do_backup ;;
   restore)   do_restore ;;
   status)    do_status ;;
+  svcheck)   do_svcheck ;;
   setup)     do_setup "$@" ;;
   menu)      do_menu ;;
   backup-cron) apply_backup_cron ;;
