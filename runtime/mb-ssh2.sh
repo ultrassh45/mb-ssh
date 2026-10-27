@@ -1118,6 +1118,7 @@ case $cmd in
   backup-cron) apply_backup_cron ;;
   schedule)  do_schedule "$@" ;;
   update)    [[ ${1:-} == --check ]] && _update_check || do_update ;;
+  set-domain) bash "$SRC_DIR/install/04-domain.sh" force ;;
   rollback)  do_rollback "$@" ;;
   login-check) do_login_check ;;
   dropbear)  do_dropbear "$@" ;;
