@@ -1,5 +1,5 @@
 #!/bin/bash
-# install/03-hardening.sh — fail2ban (admin SSH) + hardening dasar
+# 03-hardening.sh — fail2ban (admin SSH) + hardening dasar
 #
 # CATATAN PENTING:
 # fail2ban hanya efektif utk port 22 (openssh admin). Brute-force akun customer
@@ -7,13 +7,15 @@
 # itu dilindungi IpGuard di mb-edge (lihat edge.json "guard").
 set -euo pipefail
 log() { echo -e "\033[1;35m[hardening]\033[0m $*"; }
+die() { echo -e "\033[1;31m[hardening]\033[0m $*" >&2; exit 1; }
+. "$(dirname "${BASH_SOURCE[0]}")/lib-os.sh" 2>/dev/null || die "lib-os.sh tidak ada"
 
 # ---------- fail2ban ----------
 log "fail2ban..."
 export DEBIAN_FRONTEND=noninteractive
 if ! dpkg -s fail2ban >/dev/null 2>&1; then
-  apt-get update -qq
-  apt-get install -y -qq fail2ban >/dev/null
+  apt-get update -qq >/dev/null 2>&1
+  install_pkg fail2ban || log "fail2ban tidak terpasang (no-op)"
 fi
 
 mkdir -p /etc/fail2ban/jail.d

@@ -34,6 +34,13 @@ fi
 log() { echo -e "\033[1;32m[mb-ssh]\033[0m $*"; }
 die() { echo -e "\033[1;31m[mb-ssh]\033[0m $*" >&2; exit 1; }
 
+# ---------- validasi OS: Ubuntu 20+ / Debian 10+ ----------
+[[ -f "$ROOT/install/lib-os.sh" ]] && . "$ROOT/install/lib-os.sh"
+if command -v os_check >/dev/null 2>&1; then
+  OS_OK="$(os_check)" || die "OS ini tidak didukung. Minimal: Ubuntu 20+ / Debian 10+"
+  log "OS terdeteksi: $OS_OK"
+fi
+
 [[ $EUID -eq 0 ]] || die "jalankan sebagai root"
 command -v python3 >/dev/null || die "python3 tidak ada"
 

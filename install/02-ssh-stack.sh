@@ -8,11 +8,15 @@ WARP="${1:-0}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ---------- paket ----------
+# validasi OS sudah dilakukan run.sh (Ubuntu 20+/Debian 10+); source helper utk install_pkg
+. "$(dirname "${BASH_SOURCE[0]}")/lib-os.sh" 2>/dev/null || die "lib-os.sh tidak ada"
 log "install prereq + stunnel4..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq stunnel4 rclone gcc make zlib1g-dev autoconf automake libtool 2>/dev/null >/dev/null || \
-  apt-get install -y -qq stunnel4 rclone gcc make zlib1g-dev >/dev/null
+apt-get update -qq >/dev/null 2>&1
+install_pkg stunnel4 rclone gcc make zlib1g-dev autoconf automake libtool || {
+  log "paket penuh gagal — coba set minimal..."
+  install_pkg stunnel4 rclone gcc make zlib1g-dev || die "instal paket gagal (cek /etc/apt/sources)"
+}
 
 # ---------- dropbear (multi-versi, default 2019) ----------
 # Default: DROPBEAR_2019.78 (rilis terakhir tahun 2019 — yang familier di autoscript).

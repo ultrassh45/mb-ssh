@@ -37,7 +37,7 @@ bash run.sh                  # + --warp utk exit IP Cloudflare per-user
 ```
 > Repo **PRIVATE** — perlu akses (PAT/token) utk clone. Satu repo = satu node (atau
 > satu source utk semua node kamu; config per-node ada di `/etc/mb-ssh2/*`, tak
-> ditimpa update).
+> ditimpa update). **OS: Ubuntu 20+/Debian 10+** (validasi otomatis; lain → error jelas).
 
 Update node (idempotent, config user tak tersentuh):
 ```bash
