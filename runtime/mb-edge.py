@@ -931,8 +931,8 @@ class Edge:
             args += ["--add-days", str(ad)]
         if "bw_down" in d or "bw_up" in d:
             cur = self.users.get(user, {})
-            bd = d.get("bw_down", cur.get("bw_down", 100))
-            bu = d.get("bw_up", cur.get("bw_up", 50))
+            bd = d.get("bw_down", cur.get("bw_down", 0))
+            bu = d.get("bw_up", cur.get("bw_up", 0))
             if not (0 <= bd <= 1000 and 0 <= bu <= 1000):
                 return 400, {"error": "bw harus 0-1000"}
             args += ["--bw", f"{bd}/{bu}"]
