@@ -230,6 +230,12 @@ C=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Authorization: Bearer tes
 # 7f. username invalid → 400
 C=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Authorization: Bearer testtok123' \
   -d '{"username":"a b; rm -rf /","days":30}' $API/v1/users); [[ $C == 400 ]]; check $? "POST username inject = 400 ($C)"
+# 7g. /v1/exists: user ada (tuser_api) vs baru (takada_x) + invalid
+R=$(curl -s -H 'Authorization: Bearer testtok123' "$API/v1/exists?username=tuser_api")
+echo "$R" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('exists') is True and 'ssh' in d.get('in',[])" 2>/dev/null; check $? "exists?username=tuser_api → exists=True (in ssh)"
+R=$(curl -s -H 'Authorization: Bearer testtok123' "$API/v1/exists?username=takada_x")
+echo "$R" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('exists') is False" 2>/dev/null; check $? "exists?username=takada_x → exists=False"
+C=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer testtok123' "$API/v1/exists?username=a%20b"); [[ $C == 400 ]]; check $? "exists?username=invalid → 400 ($C)"
 # 7g. list
 echo "$(curl -s -H 'Authorization: Bearer testtok123' $API/v1/users)" | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'tuser_api' in d"; check $? "GET /v1/users berisi tuser_api"
 # 7h. show

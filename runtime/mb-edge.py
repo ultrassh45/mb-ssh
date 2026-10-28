@@ -726,6 +726,15 @@ class Edge:
             return await self._users_list()
         if path == "/v1/users" and method == "POST":
             return await self._user_create(data)
+        if path.split("?")[0] == "/v1/exists" and method == "GET":
+            # query: ?username=x — parse dari path raw
+            q = path.split("?", 1)[1] if "?" in path else ""
+            usr = ""
+            for kv in q.split("&"):
+                if kv.startswith("username="):
+                    usr = kv[9:]
+                    break
+            return await self._user_exists(usr)
         m = re.fullmatch(r"/v1/users/([a-z0-9_]{3,32})", path)
         if m:
             user = m.group(1)
@@ -757,6 +766,40 @@ class Edge:
             return 200, json.loads(out)
         except json.JSONDecodeError:
             return 500, {"error": "cli output bukan json"}
+
+    async def _user_exists(self, user):
+        """Cek username sudah dipakai di node ini (lintas protokol).
+        - SSH        : users.json (akun mb-ssh) ATAU user UNIX (/etc/passwd)
+        - VLESS/VMess/Trojan : Marzban db.sqlite3 (users table)
+        Return: 200 {exists: bool, in: [ssh|marzban|unix]}
+        """
+        user = str(user or "").strip().lower()
+        if not self.USER_RE.match(user):
+            return 400, {"error": "username harus 3-32 char [a-z0-9_]"}
+        found = []
+        # 1. SSH state
+        if self.users.get(user):
+            found.append("ssh")
+        # 2. user UNIX
+        try:
+            import pwd
+            pwd.getpwnam(user)
+            found.append("unix")
+        except KeyError:
+            pass
+        # 3. Marzban db
+        try:
+            import sqlite3, os
+            db = "/opt/marzban/db.sqlite3"
+            if os.path.exists(db):
+                con = sqlite3.connect(db)
+                cur = con.execute("SELECT 1 FROM users WHERE username LIKE ?", (user,))
+                if cur.fetchone():
+                    found.append("marzban")
+                con.close()
+        except Exception:
+            pass
+        return 200, {"exists": bool(found), "in": found}
 
     async def _user_create(self, d):
         user = str(d.get("username", "")).lower()
