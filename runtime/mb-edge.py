@@ -881,7 +881,7 @@ class Edge:
         if not self.USER_RE.match(user):
             return 400, {"error": "username harus 3-32 char [a-z0-9_]"}
         days = d.get("days", 30)
-        bw_down, bw_up = d.get("bw_down", 100), d.get("bw_up", 50)
+        bw_down, bw_up = d.get("bw_down", 0), d.get("bw_up", 0)
         quota = d.get("quota_gb", 0)
         backend = d.get("backend", "direct")
         password = d.get("password", "")

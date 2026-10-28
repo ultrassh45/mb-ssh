@@ -173,6 +173,8 @@ Yang di-backup (per node, path R2: `$R2_PATH/{state,config}`):
   fallback build source** (prebuilt butuh GLIBC 2.38, gagal di Ubuntu 22) — build
   badvpn 1.999.130 `-DBUILD_UDPGW=ON`, selalu jalan di glibc lokal.
 - **Bandwidth** : token-bucket di edge (bytes/sec, down/up terpisah, hot-apply tanpa restart).
+  **Default UNLIMITED** (0/0 = tak dibatasi — utk kenyamanan user). Opsional `--bw D/U`
+  kalau mau batasi kecepatan, atau `set --bw 0/0` utk kembalikan unlimited.
 - **Quota (GB)** : akumulasi byte in+out per akun. Saat `quota_used >= quota_gb`, edge
   auto-blok (koneksi baru ditolak + koneksi aktif ditutup). `--reset-quota` / naikkan
   kuota untuk membuka. 0 = unlimited.

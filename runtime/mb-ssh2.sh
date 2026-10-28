@@ -166,13 +166,15 @@ write_client_info() {
   qta=$(jget "$user" "e.get('quota_gb',0)")
   local qstr="unlimited"; [[ ${qta:-0} -gt 0 ]] && qstr="${qta}GB (lifetime)"
   local expstr="unlimited"; [[ ${pexp:-0} -gt 0 ]] && expstr=$(date -u -d "@$pexp" '+%F %T UTC')
+  local bwstr="Unlimited"
+  [[ ${bwd:-0} -gt 0 || ${bwu:-0} -gt 0 ]] && bwstr="${bwd}M down / ${bwu}M up"
   cat > "$STATE_DIR/client-$user.txt" <<EOF
 Node        : $DOMAIN
 User        : $user
 Password    : $pass
 Expire      : $expstr
 SSH Port    : $port      (via Cloudflare)
-Bandwidth   : ${bwd}M down / ${bwu}M up
+Bandwidth   : $bwstr
 Quota       : $qstr
 EOF
   # port pool lengkap, dikelompokkan TLS/nonTLS (443 & 80 utama, sisanya alternatif)
@@ -209,7 +211,7 @@ EOF
 # ---------- server message (MOTD) per-user ----------
 write_motd() {
   local user="$1"
-  local port pexp bwd bwu qta expstr qstr
+  local port pexp bwd bwu qta expstr qstr bwstr
   port=$(jget "$user" "e.get('port','')")
   pexp=$(jget "$user" "e.get('expire_ts',0)")
   bwd=$(jget "$user" "e.get('bw_down_mbps',0)")
@@ -217,6 +219,7 @@ write_motd() {
   qta=$(jget "$user" "e.get('quota_gb',0)")
   qstr="unlimited"; [[ ${qta:-0} -gt 0 ]] && qstr="${qta}GB"
   expstr="unlimited"; [[ ${pexp:-0} -gt 0 ]] && expstr=$(date -u -d "@$pexp" '+%F %T UTC')
+  bwstr="Unlimited"; [[ ${bwd:-0} -gt 0 || ${bwu:-0} -gt 0 ]] && bwstr="${bwd}M down / ${bwu}M up"
   local rc="/home/$user/.bashrc"
   [[ -d /home/$user ]] || return 0
   touch "$rc"
@@ -239,7 +242,7 @@ if [[ -z "\${MB_SSH_MOTD:-}" ]]; then
 |  Akun     : $user
 |  Expire   : $expstr
 |  SSH Port : $port (via Cloudflare)
-|  Bandwidth: ${bwd}M down / ${bwu}M up
+|  Bandwidth: $bwstr
 |  Quota    : $qstr
 |  Support  : ${SUPPORT:-zxpedia}
 +----------------------------------------------------+
@@ -251,7 +254,7 @@ EOF
 
 # ---------- ops ----------
 do_add() {
-  local user="$1" days="${2:-30}" udp=0 bwd=100 bwu=50 backend=direct warp=0 quota=0
+  local user="$1" days="${2:-30}" udp=0 bwd=0 bwu=0 backend=direct warp=0 quota=0
   shift $(( $# >= 2 ? 2 : $# )) || true
   # parse flags (sisa arg)
   while [[ $# -gt 0 ]]; do case "$1" in
