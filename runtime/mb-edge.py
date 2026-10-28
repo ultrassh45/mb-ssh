@@ -28,6 +28,8 @@ import shutil
 import signal
 import socket
 import subprocess
+import urllib.parse
+import urllib.request
 import sys
 import time
 
@@ -41,7 +43,33 @@ BADVPN_BIN = os.environ.get("MB_BADVPN_BIN", "/usr/local/bin/badvpn-udpgw")
 VERSION = "mb-edge 3.0.0"
 GB = 1024 ** 3
 
+# Telegram notif (opsional). Dipakai utk alert quota-habis & multi-login.
+# Sumber: edge.json "telegram": {"token", "chat_id"} → fallback env MB_TG_BOT_TOKEN/MB_TG_CHAT_ID
+TG_TOKEN = os.environ.get("MB_TG_BOT_TOKEN", "")
+TG_CHAT_ID = os.environ.get("MB_TG_CHAT_ID", "")
+
 LOG = lambda m: print(f"[mb-edge {time.strftime('%F %T')}] {m}", flush=True)
+
+
+def tg_send(text, token=None, chat_id=None):
+    """Kirim teks ke Telegram (best-effort, stdlib). Sukses/gagal → LOG."""
+    token = token or TG_TOKEN
+    chat_id = chat_id or TG_CHAT_ID
+    if not token or not chat_id:
+        return False
+    try:
+        data = urllib.parse.urlencode({
+            "chat_id": str(chat_id),
+            "text": text,
+        }).encode()
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        with urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=8) as r:
+            ok = r.status == 200
+        LOG(f"tg_send → {chat_id}: {'ok' if ok else 'http ' + str(r.status)}")
+        return ok
+    except Exception as e:
+        LOG(f"tg_send gagal: {e}")
+        return False
 
 
 class Bucket:
@@ -164,6 +192,28 @@ class Edge:
         except FileNotFoundError:
             LOG(f"config {CFG_PATH} tidak ada")
             self.cfg = {"common_ports": [], "common_backend": ""}
+        # Telegram notif: edge.json "telegram" {token, chat_id} → override env kalau kosong
+        global TG_TOKEN, TG_CHAT_ID
+        t = (self.cfg or {}).get("telegram", {}) if isinstance(self.cfg, dict) else {}
+        if isinstance(t, dict):
+            if t.get("token"):
+                TG_TOKEN = str(t["token"])
+            if t.get("chat_id"):
+                TG_CHAT_ID = str(t["chat_id"])
+        # fallback: baca mb.conf (sumber utama bot) — TG_BOT_TOKEN / TG_CHAT_ID
+        if not TG_TOKEN or not TG_CHAT_ID:
+            try:
+                conf = re.search(r"^TG_BOT_TOKEN=\"([^\"]+)\"", open("/etc/mb-ssh2/mb.conf").read(), re.M)
+                conf_c = re.search(r"^TG_CHAT_ID=\"([^\"]+)\"", open("/etc/mb-ssh2/mb.conf").read(), re.M)
+                if conf and conf.group(1):
+                    TG_TOKEN = conf.group(1)
+                if conf_c and conf_c.group(1):
+                    TG_CHAT_ID = conf_c.group(1)
+            except OSError:
+                pass
+        # dedup notif per user per event (quota, multilogin) supaya tak spam
+        if not hasattr(self, "_ntf_dedup"):
+            self._ntf_dedup = {}  # key -> ts
 
     def backend_addr(self, name_or_addr):
         if ":" in name_or_addr:
@@ -206,12 +256,25 @@ class Edge:
             except asyncio.CancelledError:
                 break
 
+    def _ntf(self, key, text, cooldown=3600):
+        """Kirim notif TG sekali per key per cooldown (default 1 jam)."""
+        now = time.time()
+        last = self._ntf_dedup.get(key, 0)
+        if now - last < cooldown:
+            return
+        self._ntf_dedup[key] = now
+        tg_send(text)
+
     # ---------- quota + expire ----------
     def _check_expire(self, user, u):
         exp = u.get("expire_ts", 0) or 0
         if not u.get("blocked") and exp > 0 and time.time() >= exp:
             u["blocked"] = "expired"
             LOG(f"EXPIRE {user}: masa berlaku habis — BLOCKED")
+            self._ntf(
+                f"expired:{user}",
+                f"⚠ *AKUN EXPIRED*\nUser: `{user}`\nMasa berlaku habis — diblokir otomatis.",
+            )
         return u.get("blocked")
 
     def _check_quota(self, user, u):
@@ -220,6 +283,11 @@ class Edge:
                 and self.quota_used(user) >= u["quota_bytes"]:
             u["blocked"] = "quota"
             LOG(f"QUOTA {user}: {self.quota_used(user)} >= {u['quota_bytes']} — BLOCKED")
+            gb = u.get("quota_gb", 0)
+            self._ntf(
+                f"quota:{user}",
+                f"⛔ *BANDWIDTH HABIS*\nUser: `{user}`\nKuota {gb}GB terpakai — diblokir otomatis.",
+            )
         return u.get("blocked")
 
     async def enforce_quota(self):
@@ -266,6 +334,13 @@ class Edge:
                 st["sessions"] += 1
                 st["active"] += 1
                 u["conns"].add(rw_writer)
+                # multi-login alert (aktif >= 2 sesi bersamaan)
+                if st["active"] >= 2:
+                    self._ntf(
+                        f"ml:{user}",
+                        f"👥 *LOGIN BERGANDA*\nUser: `{user}`\n{st['active']} sesi aktif bersamaan.",
+                        cooldown=600,
+                    )
             try:
                 ur, uw = await asyncio.open_connection(*backend.split(":"))
             except OSError as e:
