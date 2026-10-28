@@ -1075,6 +1075,72 @@ do_svcheck() {
   echo "  client-info : $STATE_DIR (per-akun .txt)"
 }
 
+do_bot() {
+  # set token bot telegram (+chat_id) lalu restart mb-tgbot
+  #   mb-ssh2 bot <token> [chat_id]   (non-interaktif)
+  #   mb-ssh2 bot                     (prompt interaktif)
+  local tok="${1:-}" cid="${2:-}"
+  if [[ -z $tok ]]; then
+    echo "--- SET BOT TELEGRAM ---"
+    echo "1) Buat bot: @BotFather → /newbot → salin token"
+    echo "2) Chat id: kirim pesan ke bot → https://api.telegram.org/bot<TOKEN>/getUpdates"
+    read -rp "TG_BOT_TOKEN [${TG_BOT_TOKEN:***}]: " tok; tok="${tok:-$TG_BOT_TOKEN}"
+    read -rp "TG_CHAT_ID [${TG_CHAT_ID:-<kosong>}]: " cid; cid="${cid:-$TG_CHAT_ID}"
+  fi
+  [[ -n $tok ]] || die "token kosong"
+  local who
+  who=$(curl -s -m 10 "https://api.telegram.org/bot${tok}/getMe" 2>/dev/null | \
+    python3 -c "import json,sys
+try:
+    d=json.load(sys.stdin)
+    print('@'+d['result']['username'] if d.get('ok') else 'GAGAL: '+str(d.get('description','?'))[:80])
+except Exception:
+    print('GAGAL cek (network?)')" 2>/dev/null)
+  [[ $who == @* ]] || die "TG_BOT_TOKEN tidak valid ($who) — cek token dari @BotFather"
+  [[ -z $cid ]] && cid="${TG_CHAT_ID:-}"
+  _conf_set TG_BOT_TOKEN "$tok"
+  [[ -n $cid ]] && _conf_set TG_CHAT_ID "$cid"
+  log "bot tersimpan: $who (chat: ${cid:-<kosong>})"
+  # restart bot (dan edge agar baca TG utk notif quota/multilogin)
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload 2>/dev/null
+    systemctl enable --now mb-tgbot 2>/dev/null && log "service mb-tgbot aktif" \
+      || log "start mb-tgbot gagal — cek: systemctl status mb-tgbot"
+    systemctl restart mb-edge 2>/dev/null && log "mb-edge di-restart (baca notif TG)" \
+      || log "restart mb-edge gagal"
+  fi
+}
+
+do_banner() {
+  # edit /etc/issue.net (banner customer saat konek SSH) + restart dropbear
+  #   mb-ssh2 banner            → nano editor
+  #   mb-ssh2 banner <string>   → tulis langsung
+  echo "--- SET BANNER (/etc/issue.net) ---"
+  if [[ -n $1 ]]; then
+    printf '%s\n' "$*" > /etc/issue.net
+    log "banner ditulis: ${*:0:50}..."
+  else
+    command -v nano >/dev/null 2>&1 || { log "nano tidak ada — pakai cat/tee manual /etc/issue.net"; }
+    # prompt per-baris (tanpa nano — lebih aman)
+    echo "Masukkan baris banner (enter kosong = selesai):"
+    > /etc/issue.net
+    local line i=0
+    while true; do
+      read -rp "  L${i}: " line
+      [[ -z $line ]] && break
+      echo "$line" >> /etc/issue.net
+      i=$((i+1))
+    done
+    [[ $i -eq 0 ]] && log "banner kosong (biarkan /etc/issue.net awal)?" 
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl restart dropbear-client 2>/dev/null && log "dropbear-client di-restart (banner baru aktif)" \
+      || log "restart dropbear-client gagal"
+  fi
+  log "banner siap:"
+  cat /etc/issue.net
+}
+
 do_menu() {
   local choice c u d
   while true; do
@@ -1101,8 +1167,11 @@ do_menu() {
     echo " 12) Update script + auto-rollback"
     echo " 13) Ganti versi dropbear (2019.78 default, bebas pilih)"
     echo " 14) Cek status service (mb-edge/dropbear/stunnel/bot)"
+    echo " 15) Set token bot telegram + notif (restart bot/edge)"
+    echo " 16) Ganti domain node (validasi pointing + cert + restart stunnel)"
+    echo " 17) Ganti banner /etc/issue.net (restart dropbear)"
     echo " 0)  Keluar"
-    read -rp "Pilih [0-14]: " choice
+    read -rp "Pilih [0-17]: " choice
     case $choice in
       1) read -rp "Username: " u
          read -rp "Durasi (hari, kosong=30): " d; d="${d:-30}"
@@ -1151,6 +1220,9 @@ PY
       12) do_update ;;
       13) do_dropbear ;;
       14) do_svcheck ;;
+      15) do_bot ;;
+      16) bash "$SRC_DIR/install/04-domain.sh" force ;;
+      17) do_banner ;;
       0|*) break ;;
     esac
   done
@@ -1168,12 +1240,17 @@ case $cmd in
   restore)   do_restore ;;
   status)    do_status ;;
   svcheck)   do_svcheck ;;
+  set-domain) do_set_domain ;;
+  set-token) do_set_token ;;
+  set-banner) do_set_banner ;;
   setup)     do_setup "$@" ;;
   menu)      do_menu ;;
   backup-cron) apply_backup_cron ;;
   schedule)  do_schedule "$@" ;;
   update)    [[ ${1:-} == --check ]] && _update_check || do_update ;;
   set-domain) bash "$SRC_DIR/install/04-domain.sh" force ;;
+  bot)       do_bot "$@" ;;
+  banner)    do_banner "$@" ;;
   rollback)  do_rollback "$@" ;;
   login-check) do_login_check ;;
   dropbear)  do_dropbear "$@" ;;

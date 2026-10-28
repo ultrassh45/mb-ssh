@@ -89,6 +89,38 @@ done
 sed -i -E "s|^DOMAIN=.*|DOMAIN=\"$DOM\"|" "$CONF"
 log "DOMAIN tersimpan: $DOM"
 
+# regenerasi MOTD + banner issue.net (branding pakai domain baru) hanya saat
+# set-domain (post-install); saat install run.sh sudah regenerasi setelah ini.
+if [[ $FORCE == force ]]; then
+  local STATE_DIR_="${STATE_DIR:-/var/lib/mb-ssh}" SSH2_BIN_="${SSH2_BIN:-/usr/local/bin/mb-ssh2}"
+  # MOTD global (pakai mb.conf DOMAIN baru)
+  . "$CONF" 2>/dev/null || true
+  {
+    echo "+----------------------------------------------------+"
+    echo "|  $DOM - SSH & WARP Server                       |"
+    echo "|  Terima kasih sudah berlangganan.                  |"
+    echo "|  Support : ${SUPPORT:-zxpedia}"
+    echo "+----------------------------------------------------+"
+  } > /etc/motd
+  # banner issue.net (customer)
+  {
+    echo "============================================================="
+    echo "  ${DOM} — Terima kasih telah menggunakan layanan VPN kami."
+    echo "  Support : ${SUPPORT:-zxpedia}"
+    echo "============================================================="
+  } > /etc/issue.net
+  log "MOTD + /etc/issue.net di-regenerasi (domain $DOM)"
+  # client-info per user di-update (host/domain baru)
+  if [[ -x $SSH2_BIN_ ]]; then
+    for uf in "$STATE_DIR_"/client-*.txt; do
+      [[ -e $uf ]] || continue
+      local u="$(basename "$uf" | sed 's/^client-//; s/\.txt$//')"
+      "$SSH2_BIN_" show "$u" >/dev/null 2>&1 && "$SSH2_BIN_" show "$u" --json >/dev/null 2>&1
+    done
+    log "client-info user di-refresh"
+  fi
+fi
+
 # ---------- SSL cert: default Let's Encrypt ----------
 echo ""
 echo "------------------------------------------------------------"
@@ -113,6 +145,9 @@ if [[ "${S:-1}" != "2" ]]; then
           (crontab -l 2>/dev/null; echo "17 3 1,19 * * certbot renew --quiet >/dev/null 2>&1 && cat /etc/letsencrypt/live/$DOM/fullchain.pem /etc/letsencrypt/live/$DOM/privkey.pem > /etc/mb-ssh2/cert.pem && systemctl restart stunnel") | crontab -
           log "renew cron terpasang (2x/bln) utk $DOM"
         fi
+        # restart stunnel agar cert baru aktif
+        systemctl restart stunnel 2>/dev/null && log "stunnel di-restart (cert baru aktif)" \
+          || log "restart stunnel gagal (amankah? cek: systemctl status stunnel)"
         log "SELESAI — domain & cert siap."
         exit 0
       fi
@@ -126,6 +161,9 @@ fi
   openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
     -keyout /etc/mb-ssh2/key.pem -out /etc/mb-ssh2/cert.pem \
     -subj "/CN=$DOM" 2>/dev/null
+# restart stunnel agar cert (self-signed/lama) ter-load
+systemctl restart stunnel 2>/dev/null && log "stunnel di-restart (cert aktif)" \
+  || log "restart stunnel gagal — cek: systemctl status stunnel"
 log "cert siap: /etc/mb-ssh2/cert.pem (self-signed CN=$DOM) — pakai opsi 1 (Let's Encrypt) utk cert asli."
 echo ""
 echo "  (verifikasi: grep DOMAIN /etc/mb-ssh2/mb.conf)"

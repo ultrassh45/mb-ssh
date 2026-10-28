@@ -86,8 +86,14 @@ mb-ssh2 menu     # header tampil total akun per service:
                #  5) Detail akun          12) Update script + auto-rollback
                #  6) Setup R2 + bot        13) Ganti versi dropbear
                #  7) Jadwal backup         14) Cek status service + dropbear
+               #                          15) Set token bot + notif
+               #                          16) Ganti domain (validasi+cert)
+               #                          17) Ganti banner /etc/issue.net
 mb-ssh2 status   # cek singkat: akun per service + R2 set? bot jalan? jadwal?
 mb-ssh2 svcheck  # status systemd mb-edge/dropbear/stunnel/bot/marzban + versi dropbear
+mb-ssh2 bot <token> [chat_id]   # set token bot + restart mb-tgbot & mb-edge
+mb-ssh2 banner                # edit /etc/issue.net + restart dropbear-client
+mb-ssh2 set-domain              # ganti domain + validasi pointing + cert + restart stunnel
 ```
 Non-interaktif (script/bot): 
 - `mb-ssh2 setup <R2_REMOTE> [R2_PATH] <TG_BOT_TOKEN> <TG_CHAT_ID>` — token invalid = ditolak
