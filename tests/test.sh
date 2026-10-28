@@ -77,8 +77,13 @@ print(s.recv(1024).decode())" 2>/dev/null)
 echo "=== 2. CLI add (test1) ==="
 CLI add test1 30 >/dev/null 2>&1; RC=$?
 check $RC "add test1 30"
-PORT1=$(python3 -c "import json; print(json.load(open('$T/state/users.json'))['test1']['port'])")
+PORT1=$(python3 -c "import json; print(json.load(open('$T/state/users.json'))['test1']['port'])" )
 echo "  (port test1 = $PORT1)"
+
+# keamanan: akun customer = nologin (no shell), tapi tetap bisa auth (tunnel)
+SHELL1=$(getent passwd test1 | cut -d: -f7)
+[[ "$SHELL1" == "/usr/sbin/nologin" ]] || [[ "$SHELL1" == "/bin/false" ]]
+check $? "akun customer shell non-interaktif (login ditolak, tunnel tetap) — ($SHELL1)"
 
 # client-info memuat port list, dikelompokkan TLS/nonTLS
 R=$(grep -A2 "Port List" "$T/state/client-test1.txt" 2>/dev/null | head -3)
@@ -145,7 +150,7 @@ B=$(python3 -c "import json; print(json.load(open('$T/state/users.json'))['test1
 [[ $B == "0.001" ]]; check $? "state quota_gb=0.001"
 # --- poll sampai quota rejected (race-safe) ---
 R=""
-for _i in 1 2 3 4 5 6; do
+for _i in 1 2 3 4 5 6 7 8 9 10; do
   R=$(python3 -c "
 import socket
 s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',$PORT1))

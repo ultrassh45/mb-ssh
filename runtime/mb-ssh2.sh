@@ -269,7 +269,7 @@ do_add() {
   now=$(date +%s)
   [[ $days -gt 0 ]] && pexp=$((now + days*86400)) || pexp=0
 
-  useradd -m -s /bin/bash "$user" || die "useradd gagal"
+  useradd -m -s /usr/sbin/nologin "$user" || die "useradd gagal"
   echo "$user:$pass" | chpasswd
   [[ $pexp -gt 0 ]] && usermod -e "$(date -u -d "@$pexp" '+%Y-%m-%d')" "$user"
 
