@@ -13,6 +13,8 @@
 #   mb-ssh2 schedule 30 m      (jadwal backup otomatis: 30 m / 6 j / 0 = harian 03:03)
 #   mb-ssh2 menu               (menu interaktif bernomor 0-11)
 #   mb-ssh2 edge-list / edge-add / edge-remove  (raw edge control)
+#   mb-ssh2 apikey [--reset]          → lihat / reset API token edge (SSH)
+#   mb-ssh2 marzban-token [--verify]  → dapatkan JWT API Marzban (fresh login)
 #
 # Bot Telegram (set via setup): /backup /restore /status /help
 #
@@ -700,6 +702,70 @@ do_rollback() {
   fi
 }
 
+do_apikey() {
+  #   mb-ssh2 apikey            → print API token edge (dari $EDGE_CFG api.token)
+  #   mb-ssh2 apikey --reset    → regenerate token acak, tulis edge.json, restart mb-edge
+  local cfg="${EDGE_CFG:-$CONF_DIR/edge.json}"
+  [[ -f $cfg ]] || die "edge config tidak ada: $cfg"
+  local cur=$(python3 -c "import json,sys; print(json.load(open('$cfg'))['api']['token'])" 2>/dev/null)
+  if [[ "${1:-}" == "--reset" ]]; then
+    local new="${2:-}"
+    [[ -z $new ]] && new=$(python3 -c "import secrets; print('mb'+secrets.token_hex(24))")
+    python3 - "$cfg" "$new" <<'PY'
+import json, sys
+p, tok = sys.argv[1], sys.argv[2]
+d = json.load(open(p))
+d['api']['token'] = tok
+json.dump(d, open(p, 'w'), indent=2, ensure_ascii=False)
+print("tersimpan")
+PY
+    # restart mb-edge supaya token baru dipakai (UI admin panel juga wajib pakai yg ini)
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q mb-edge; then
+      systemctl restart mb-edge && log "mb-edge restart — token baru aktif (update panel: Server → API Token Node = $new)"
+    else
+      log "mb-edge bukan systemd — restart manual / edge relaod: kill -HUP $(pidof mb-edge.py 2>/dev/null) (token lama: $cur)"
+    fi
+    echo "TOKEN BARU: $new"
+    return 0
+  fi
+  curl -s -m 10 "http://127.0.0.1:8499/v1/health" -H "Authorization: Bearer $cur" >/dev/null 2>&1 && echo "OK" || echo "TIDAK TERVERIFIKASI (node mati/remote?)"
+  echo "API Token (SSH): $cur"
+  echo "Lokasi: $cfg"
+  echo "Gunakan token ini di panel: Server → Add/Edit → API Token Node"
+}
+
+do_marzban_token() {
+  # baca kredensial admin dari /opt/marzban/.env → login → print JWT fresh
+  #   mb-ssh2 marzban-token              → token (JWT) utk dashboard API
+  #   mb-ssh2 marzban-token --creds      → print username + (password didapat dari .env db)
+  local env="/opt/marzban/.env"
+  [[ -f $env ]] || die "Marzban .env tidak ada: $env — node belum install Marzban?"
+  local sudouser=$(grep -E "^SUDO_USERNAME=" "$env" | cut -d= -f2- | tr -d '"')
+  local sudopass=$(grep -E "^SUDO_PASSWORD=" "$env" | cut -d= -f2- | tr -d '"' | base64 -d 2>/dev/null || grep -E "^SUDO_PASSWORD=" "$env" | cut -d= -f2- | tr -d '"')
+  [[ -n $sudouser ]] || die "SUDO_USERNAME kosong di .env"
+  [[ -n $sudopass ]] || die "SUDO_PASSWORD kosong di .env"
+  local base="${MBZ_BASE:-http://127.0.0.1:8000}"
+  curl -s -m 10 -X POST "$base/api/admin/token" -u "${sudouser}:${sudopass}" \
+    > /tmp/mbz-token.json 2>/dev/null || die "post gagal"
+  python3 - <<'PY'
+import json, time
+try:
+    d = json.load(open('/tmp/mbz-token.json'))
+    tok = d.get('access_token', d.get('token'))
+    if not tok:
+        print('RESPON TANPA access_token:'); print(json.dumps(d, indent=2)[:500]); raise SystemExit(1)
+    print("ACCESS_TOKEN (Marzban):"); print(tok)
+    exp = d.get('expires_in')
+    if exp: print(f"expire {int(exp)} detik ({d.get('expires_in')})")
+except Exception as e:
+    print(f"parse gagal: {e}"); raise SystemExit(1)
+PY
+  # opsional: cek valid token / ketik "--verify"
+  if [[ "${1:-}" == "--verify" ]]; then
+    curl -s -m 10 "$base/api/admin/" -H "Authorization: Bearer $(python3 -c "import json; print(json.load(open('/tmp/mbz-token.json')).get('access_token',''))")" >/dev/null 2>&1 && echo "VERIFIED: token aktif utk API admin" || echo "WARNING: token tak aktif"
+  fi
+}
+
 do_login_check() {
   # dipanggil tiap login interaktif (via bashrc hook). Tampilkan UPDATE TERSEDIA
   # + rincian + pilihan Y/N. Up-to-date / tak bisa cek = diam (MOTD normal).
@@ -1173,8 +1239,9 @@ do_menu() {
     echo " 15) Set token bot telegram + notif (restart bot/edge)"
     echo " 16) Ganti domain node (validasi pointing + cert + restart stunnel)"
     echo " 17) Ganti banner /etc/issue.net (restart dropbear)"
+    echo " 18) Lihat/reset API token (SSH edge) + token Marzban"
     echo " 0)  Keluar"
-    read -rp "Pilih [0-17]: " choice
+    read -rp "Pilih [0-18]: " choice
     case $choice in
       1) read -rp "Username: " u
          read -rp "Durasi (hari, kosong=30): " d; d="${d:-30}"
@@ -1226,8 +1293,10 @@ PY
       15) do_bot ;;
       16) bash "$SRC_DIR/install/04-domain.sh" force ;;
       17) do_banner ;;
-      0|*) break ;;
-    esac
+      18) echo "---"; do_apikey; echo ""; echo "--- Marzban ---"; do_marzban_token || true ;;
+      0) echo "bye"; break ;;
+      *) echo "Pilihan tidak valid"; sleep 1 ;;
+      esac
   done
 }
 
@@ -1239,7 +1308,8 @@ case $cmd in
   set)       [[ -n ${1:-} ]] || die "usage: mb-ssh2 set <user> [days] [--bw D/U]"; do_set "$@" ;;
   list)      do_list "$@" ;;
   show)      [[ -n ${1:-} ]] || die "usage: mb-ssh2 show <user> [--json]"; do_show "$1" "${2:-}" ;;
-  backup)    do_backup ;;
+  apikey)     do_apikey "$@" ;;
+  marzban-token) do_marzban_token "$@" ;;
   restore)   do_restore ;;
   status)    do_status ;;
   svcheck)   do_svcheck ;;
