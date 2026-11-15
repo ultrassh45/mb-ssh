@@ -20,7 +20,8 @@
   "guard": {
     "max_conn": 20,
     "window": 60,
-    "ban_sec": 600
+    "ban_sec": 600,
+    "default_ip_limit": 0
   },
   "telegram": {
     "token": "",

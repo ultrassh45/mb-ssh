@@ -157,7 +157,7 @@ warp_rule_del() {
 write_client_info() {
   local user="$1"
   local entry; entry=$(python3 -c "import json; print(json.dumps(json.load(open('$USERS_JSON')).get('$1',{})))")
-  local pass port pexp bwd bwu udp wpt
+  local pass port pexp bwd bwu udp wpt ipl
   pass=$(jget "$user" "e.get('pass','')")
   port=$(jget "$user" "e.get('port','')")
   pexp=$(jget "$user" "e.get('expire_ts',0)")
@@ -165,11 +165,13 @@ write_client_info() {
   bwu=$(jget "$user" "e.get('bw_up_mbps',0)")
   udp=$(jget "$user" "e.get('udpgw',{}).get('port','')")
   wpt=$(jget "$user" "e.get('udpgw',{}).get('warp_port','')")
+  ipl=$(jget "$user" "e.get('ip_limit',0)")
   qta=$(jget "$user" "e.get('quota_gb',0)")
   local qstr="unlimited"; [[ ${qta:-0} -gt 0 ]] && qstr="${qta}GB (lifetime)"
   local expstr="unlimited"; [[ ${pexp:-0} -gt 0 ]] && expstr=$(date -u -d "@$pexp" '+%F %T UTC')
   local bwstr="Unlimited"
   [[ ${bwd:-0} -gt 0 || ${bwu:-0} -gt 0 ]] && bwstr="${bwd}M down / ${bwu}M up"
+  local ipstr="unlimited"; [[ ${ipl:-0} -gt 0 ]] && ipstr="${ipl} IP berbeda (maksimal)"
   cat > "$STATE_DIR/client-$user.txt" <<EOF
 Node        : $DOMAIN
 User        : $user
@@ -178,6 +180,7 @@ Expire      : $expstr
 SSH Port    : $port      (via Cloudflare)
 Bandwidth   : $bwstr
 Quota       : $qstr
+IP Limit    : $ipstr
 EOF
   # port pool lengkap, dikelompokkan TLS/nonTLS (443 & 80 utama, sisanya alternatif)
   local tls_p="443"; local n_tls_p="80"; local p
@@ -196,6 +199,15 @@ EOF
   [[ -n $udp ]] && cat >> "$STATE_DIR/client-$user.txt" <<EOF
 UDPGW       : $udp      (via Cloudflare)
 EOF
+  # SlowDNS (aktif kalau SLOWDNS_ENABLED=1 di mb.conf) — satu akun SSH otomatis dapat slowdns
+  if [[ "${SLOWDNS_ENABLED:-0}" == "1" && -n "${SLOWDNS_DOMAIN:-}" && -n "${SLOWDNS_PUBKEY:-}" ]]; then
+    cat >> "$STATE_DIR/client-$user.txt" <<EOF
+SlowDNS     : ${SLOWDNS_DOMAIN}:${SLOWDNS_PORT:-53}  (UDP)
+  Nameserver: ${SLOWDNS_DOMAIN}
+  PublicKey : ${SLOWDNS_PUBKEY}
+  (Pakai aplikasi yang support SlowDNS — isi IP, domain & pubkey ini)
+EOF
+  fi
   [[ -n $wpt ]] && echo "WARP      : active" >> "$STATE_DIR/client-$user.txt"
   cat >> "$STATE_DIR/client-$user.txt" <<EOF
 
@@ -256,7 +268,7 @@ EOF
 
 # ---------- ops ----------
 do_add() {
-  local user="$1" days="${2:-30}" udp=0 bwd=0 bwu=0 backend=direct warp=0 quota=0
+  local user="$1" days="${2:-30}" udp=0 bwd=0 bwu=0 backend=direct warp=0 quota=0 ip_limit="-"
   shift $(( $# >= 2 ? 2 : $# )) || true
   # parse flags (sisa arg)
   while [[ $# -gt 0 ]]; do case "$1" in
@@ -265,7 +277,10 @@ do_add() {
     --backend) backend="${2:?}"; shift;;
     --quota) quota="${2:?--quota GB}"; shift;;
     --pass) pass="${2:?--pass PASSWORD}"; shift;;
+    --ip-limit) ip_limit="${2:?--ip-limit N}"; shift;;
   esac; shift; done
+  # default dari config kalau tidak di-set via flag
+  [[ "$ip_limit" == "-" ]] && ip_limit="${DEFAULT_IP_LIMIT:-0}"
 
   id -u "$user" &>/dev/null && die "$user sudah ada"
   local port pexp now
@@ -281,7 +296,7 @@ do_add() {
   local backend_addr="127.0.0.1:$DROPBEAR_PORT"
   [[ $backend == tls ]] && backend_addr="127.0.0.1:$STUNNEL_PORT"
 
-  local spec="{\"cmd\":\"add\",\"user\":\"$user\",\"port\":$port,\"backend\":\"$backend_addr\",\"bw_down_mbps\":$bwd,\"bw_up_mbps\":$bwu"
+  local spec="{\"cmd\":\"add\",\"user\":\"$user\",\"port\":$port,\"backend\":\"$backend_addr\",\"bw_down_mbps\":$bwd,\"bw_up_mbps\":$bwu,\"ip_limit\":${ip_limit:-0}"
   local lp="" udpport=""
   if [[ $udp -eq 1 ]]; then
     udpport=$(pick_port) || die "port pool habis untuk udpgw"
@@ -302,7 +317,7 @@ do_add() {
 
   local udp_json=""
   [[ $udp -eq 1 ]] && udp_json=\",\"udpgw\":{\"port\":$udpport,\"target\":\"127.0.0.1:$lp\"}\"
-  jset "$user" "{\"pass\":\"$pass\",\"port\":$port,\"backend\":\"$backend\",\"expire_ts\":$pexp,\"days\":$days,\"bw_down_mbps\":$bwd,\"bw_up_mbps\":$bwu,\"created\":$now,\"warp\":$warp,\"quota_gb\":$quota$udp_json}"
+  jset "$user" "{\"pass\":\"$pass\",\"port\":$port,\"backend\":\"$backend\",\"expire_ts\":$pexp,\"days\":$days,\"bw_down_mbps\":$bwd,\"bw_up_mbps\":$bwu,\"ip_limit\":${ip_limit:-0},\"created\":$now,\"warp\":$warp,\"quota_gb\":$quota$udp_json}"
   write_client_info "$user"
   local extra=""
   [[ $udp -eq 1 ]] && extra="udp:$udpport"
@@ -329,12 +344,13 @@ do_del() {
 
 do_set() {
   local user="$1"; shift || true
-  local days="" bw="" port="" adays="" quota="" unblock=0 rquota=0 warpflag="" pexp=""
+  local days="" bw="" port="" adays="" quota="" unblock=0 rquota=0 warpflag="" pexp="" ip_limit=""
   while [[ $# -gt 0 ]]; do case "$1" in
     --bw) bw="${2:?}"; shift;;
     --port) port="${2:?}"; shift;;
     --add-days) adays="${2:?}"; shift;;
     --quota) quota="${2:?}"; shift;;
+    --ip-limit) ip_limit="${2:?}"; shift;;
     --unblock) unblock=1;;
     --reset-quota) rquota=1;;
     --warp) warpflag=1;;
@@ -384,7 +400,15 @@ d['$user'].update({'quota_gb':$quota})
 json.dump(d,open('$USERS_JSON','w'),indent=1)
 "
   fi
-  if [[ -n $bw || -n $quota || -n $pexp || $unblock -eq 1 || $rquota -eq 1 ]]; then
+  if [[ -n $ip_limit ]]; then
+    python3 -c "
+import json
+d=json.load(open('$USERS_JSON'))
+d['$user'].update({'ip_limit':$ip_limit})
+json.dump(d,open('$USERS_JSON','w'),indent=1)
+"
+  fi
+  if [[ -n $bw || -n $quota || -n $pexp || -n $ip_limit || $unblock -eq 1 || $rquota -eq 1 ]]; then
     local spec
     spec=$(python3 -c "
 import json
@@ -392,6 +416,7 @@ d = {'cmd': 'setbw', 'user': '$user'}
 $([[ -n $bw ]] && echo "d['bw_down_mbps'] = $bwd
 d['bw_up_mbps'] = $bwu")
 $([[ -n $quota ]] && echo "d['quota_gb'] = $quota")
+$([[ -n $ip_limit ]] && echo "d['ip_limit'] = $ip_limit")
 $([[ -n $pexp ]] && echo "d['expire_ts'] = $pexp")
 $([[ $unblock -eq 1 ]] && echo "d['unblock'] = True")
 $([[ $rquota -eq 1 ]] && echo "d['reset_quota'] = True")
@@ -1240,8 +1265,9 @@ do_menu() {
     echo " 16) Ganti domain node (validasi pointing + cert + restart stunnel)"
     echo " 17) Ganti banner /etc/issue.net (restart dropbear)"
     echo " 18) Lihat/reset API token (SSH edge) + token Marzban"
+    echo " 19) Setup SlowDNS (aktif/nonaktif + domain + pubkey)"
     echo " 0)  Keluar"
-    read -rp "Pilih [0-18]: " choice
+    read -rp "Pilih [0-19]: " choice
     case $choice in
       1) read -rp "Username: " u
          read -rp "Durasi (hari, kosong=30): " d; d="${d:-30}"
@@ -1294,6 +1320,7 @@ PY
       16) bash "$SRC_DIR/install/04-domain.sh" force ;;
       17) do_banner ;;
       18) echo "---"; do_apikey; echo ""; echo "--- Marzban ---"; do_marzban_token || true ;;
+      19) do_slowdns ;;
       0) echo "bye"; break ;;
       *) echo "Pilihan tidak valid"; sleep 1 ;;
       esac
@@ -1330,3 +1357,46 @@ case $cmd in
   edge-list)   edge_ctl '{"cmd":"list"}' ;;
   help|*)    grep -E "^# " "$0" | head -18 ;;
 esac
+
+
+do_slowdns() {
+  # Setup SlowDNS — aktif/nonaktif + domain + pubkey (disimpan di mb.conf)
+  # SLOWDNS_ENABLED=1 → setiap akun SSH baru otomatis dpt blok SlowDNS di client-info.
+  # Server slowdns di-install terpisah (/root/slowdns/install.sh); di sini cuma config.
+  echo "--- SETUP SLOWDNS ---"
+  echo "Status: $([ "${SLOWDNS_ENABLED:-0}" == "1" ] && echo AKTIF || echo NONAKTIF)"
+  echo "  Domain  : ${SLOWDNS_DOMAIN:-<kosong>}"
+  echo "  Port    : ${SLOWDNS_PORT:-53}"
+  echo "  Pubkey  : ${SLOWDNS_PUBKEY:+${SLOWDNS_PUBKEY:0:20}...}${SLOWDNS_PUBKEY:-<kosong>}"
+  echo ""
+  read -rp "Aktifkan SlowDNS untuk semua akun SSH? (y/N): " on
+  case "${on,,}" in
+    y|yes)
+      read -rp "SlowDNS domain (mis. ns.domain.com): " dm
+      dm="${dm:-$SLOWDNS_DOMAIN}"
+      [[ -n $dm ]] || { log "domain kosong — batal"; return 1; }
+      read -rp "UDP port [${SLOWDNS_PORT:-53}]: " pt; pt="${pt:-${SLOWDNS_PORT:-53}}"
+      read -rp "Public key (/root/slowdns/server.pub, enter=baca otomatis): " pk
+      if [[ -z $pk && -f /root/slowdns/server.pub ]]; then
+        pk=$(tr -d '\r\n' < /root/slowdns/server.pub)
+      fi
+      _conf_set SLOWDNS_ENABLED "1"
+      _conf_set SLOWDNS_DOMAIN "$dm"
+      _conf_set SLOWDNS_PORT "$pt"
+      [[ -n $pk ]] && _conf_set SLOWDNS_PUBKEY "$pk"
+      log "SlowDNS AKTIF: $dm:$pt (pubkey ${pk:+tersimpan}${pk:-BELUM})"
+      if [[ -z $pk ]]; then
+        echo "  !! Pubkey belum tersimpan. Baca dari server: cat /root/slowdns/server.pub"
+      fi
+      ;;
+    *)
+      _conf_set SLOWDNS_ENABLED "0"
+      log "SlowDNS NONAKTIF"
+      ;;
+  esac
+  echo ""
+  echo "Catatan:"
+  echo " 1) Install server slowdns: mkdir -p /root/slowdns && cp binary /root/slowdns/ && bash /root/slowdns/install.sh"
+  echo " 2) Upstream slowdns = 127.0.0.1:22022 (dropbear) — sama dgn jalur SSH biasa."
+  echo " 3) Limit IP & bandwidth TETAP berlaku."
+}

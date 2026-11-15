@@ -225,6 +225,31 @@ class Edge:
     def stat(self, user):
         return self.stats.setdefault(user, {"in": 0, "out": 0, "sessions": 0, "active": 0})
 
+    def check_ip_limit(self, user, u, ip):
+        """Limit jumlah IP unik per akun. 0 = unlimited.
+        Kembalikan True kalau IP diterima, False kalau ditolak (limit penuh)."""
+        limit = u.get("ip_limit", 0) or 0
+        if limit <= 0:
+            return True
+        if not ip:
+            return True
+        known = u.setdefault("known_ips", set())
+        if ip in known:
+            return True
+        if len(known) >= limit:
+            LOG(f"REJECT {user} {ip}: ip_limit tercapai ({len(known)}>={limit})")
+            return False
+        return True
+
+    def note_ip(self, user, u, ip):
+        """Catat IP unik yang pernah connect (untuk limit IP)."""
+        if not ip:
+            return
+        known = u.setdefault("known_ips", set())
+        if ip not in known:
+            known.add(ip)
+            LOG(f"IPNEW {user}: {ip} (total {len(known)})")
+
     def quota_used(self, user):
         s = self.stat(user)
         return s["in"] + s["out"]
@@ -399,6 +424,10 @@ class Edge:
         user = spec["user"]
         port = int(spec["port"])
         backend = self.backend_addr(spec.get("backend", "127.0.0.1:22022"))
+        ip_limit = int(spec.get("ip_limit", 0) or 0)
+        if ip_limit <= 0:
+            g = self.cfg.get("guard", {}) if isinstance(self.cfg, dict) else {}
+            ip_limit = int(g.get("default_ip_limit", self.cfg.get("default_ip_limit", 0)) or 0)
         u = {
             "port": port,
             "backend": backend,
@@ -412,6 +441,8 @@ class Edge:
             "quota_bytes": int(float(spec.get("quota_gb", 0)) * GB),
             "expire_ts": int(spec.get("expire_ts", 0) or 0),
             "blocked": None,
+            "ip_limit": max(0, ip_limit),   # 0 = unlimited
+            "known_ips": set(),
         }
 
         async def handler(r, w, u=u):
@@ -455,6 +486,11 @@ class Edge:
                 if self.guard and not self.guard.allow(peer[0]):
                     w.close()
                     return
+                if not self.check_ip_limit(user, u, peer[0]):
+                    LOG(f"REJECT {user} {peer}: udpgw ip_limit")
+                    w.close()
+                    return
+                self.note_ip(user, u, peer[0])
                 if self._check_quota(user, u):
                     w.close()
                     return
@@ -524,6 +560,9 @@ class Edge:
         if "quota_gb" in spec:
             u["quota_bytes"] = int(float(spec["quota_gb"]) * GB)
             LOG(f"SETQUOTA {user}: {spec['quota_gb']}GB")
+        if "ip_limit" in spec:
+            u["ip_limit"] = max(0, int(spec["ip_limit"] or 0))
+            LOG(f"SETIPLIMIT {user}: {u['ip_limit']} ({len(u.get('known_ips', set()))} IP known)")
         if spec.get("reset_quota"):
             s = self.stat(user)
             s["in"] = 0
@@ -556,6 +595,8 @@ class Edge:
                 "quota_bytes": u["quota_bytes"],
                 "quota_used": self.quota_used(user),
                 "blocked": u["blocked"],
+                "ip_limit": u.get("ip_limit", 0),
+                "known_ips_count": len(u.get("known_ips", set())),
                 "stats": s,
             }
         return json.dumps(out)
@@ -581,6 +622,7 @@ class Edge:
                 "bw_up_mbps": e.get("bw_up_mbps", 0),
                 "quota_gb": e.get("quota_gb", 0),
                 "expire_ts": e.get("expire_ts", 0),
+                "ip_limit": e.get("ip_limit", 0),
             }
             if e.get("udpgw"):
                 spec["udpgw"] = e["udpgw"]
