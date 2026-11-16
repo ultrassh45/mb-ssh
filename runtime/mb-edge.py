@@ -215,6 +215,25 @@ class Edge:
         # dedup notif per user per event (quota, multilogin) supaya tak spam
         if not hasattr(self, "_ntf_dedup"):
             self._ntf_dedup = {}  # key -> ts
+        # SlowDNS config (dari mb.conf — sumber utama, diisi lewat menu 19)
+        sd = {"enabled": False}
+        try:
+            conf_txt = open("/etc/mb-ssh2/mb.conf").read()
+            def _g(key):
+                m = re.search(rf"^{key}=\"([^\"]*)\"", conf_txt, re.M)
+                return m.group(1) if m else ""
+            enabled = _g("SLOWDNS_ENABLED")
+            dom = _g("SLOWDNS_DOMAIN")
+            port = _g("SLOWDNS_PORT")
+            pub = _g("SLOWDNS_PUBKEY")
+            if enabled == "1" and dom:
+                sd = {"enabled": True, "host": dom,
+                      "port": int(port) if port.isdigit() else 53,
+                      "nameserver": dom,
+                      "pubkey": pub}
+        except OSError:
+            pass
+        self.slowdns_cfg = sd
 
     def backend_addr(self, name_or_addr):
         if ":" in name_or_addr:
@@ -907,6 +926,7 @@ class Edge:
             "users": len(self.users), "active_sessions": total_active,
             "common_ports": sorted(self.common_servers.keys()),
             "warp": self.warp_status,
+            "slowdns": getattr(self, "slowdns_cfg", {"enabled": False}),
             "disk_pct": round(100 * du.used / du.total),
         }
 
