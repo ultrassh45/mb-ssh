@@ -59,9 +59,11 @@ mb-ssh2 set-domain     # prompt input domain + validasi pointing + cert
 ## Operasional
 ```bash
 mb-ssh2 add budi 30 --udp --bw 100/50 --quota 50   # akun SSH + UDP, 100/50 Mbps, kuota 50GB
+mb-ssh2 add siti 30 --ip-limit 3                   # limit 3 IP berbeda per akun (0=unlimited)
 mb-ssh2 set budi --add-days 30 --bw 200/100        # perpanjang + naikkan BW (hot)
 mb-ssh2 set budi --quota 100 --reset-quota         # naikkan kuota + reset pemakaian
 mb-ssh2 set budi --unblock                          # buka blokir (manual)
+mb-ssh2 set siti --ip-limit 5                      # ubah limit IP saat akun aktif
 mb-ssh2 show budi                                    # client-info (salin ke customer)
 mb-ssh2 show budi --json                             # detail + stats + quota_used (JSON)
 mb-ssh2 list --json                                  # semua akun + stats (JSON)
@@ -74,6 +76,29 @@ mb-ssh2 status                                      # ringkasan: akun per servic
 mb-ssh2 svcheck                                     # status service systemd + versi dropbear aktif
 mb-ssh2 set-domain                                  # ganti domain node (validasi pointing + cert)
 ```
+
+### Limit IP per akun
+```bash
+mb-ssh2 add user 30 --ip-limit <N>   # N = maksimum IP unik yang boleh connect (0 = unlimited)
+mb-ssh2 set user --ip-limit <N>      # ubah saat akun aktif
+# Default global: DEFAULT_IP_LIMIT di /etc/mb-ssh2/mb.conf (atau guard.default_ip_limit di edge.json)
+```
+- IP unik dilacak per akun (persist di `stats.json`, **survive restart**).
+- Saat limit tercapai, IP baru ditolak; IP yang sudah dikenal tetap bisa connect.
+- Berlaku di jalur SSH, UDPGW, dan SlowDNS (karena semua nge-relay lewat mb-edge).
+- Cek pemakaian: `mb-ssh2 list --json` → field `ip_limit` + `known_ips_count`; panel SSH node tampilkan kolom "Limit IP".
+
+### SlowDNS
+```bash
+# 1) Install server slowdns (binary terpisah, bukan dari repo):
+mkdir -p /root/slowdns && cp <slowdns-binary> /root/slowdns/ && bash /root/slowdns/install.sh
+#    upstream = 127.0.0.1:22022 (dropbear) — sama dgn jalur SSH biasa
+# 2) Aktifkan di panel akun:
+mb-ssh2 menu        # → 19) Setup SlowDNS → isi domain + pubkey (baca dari /root/slowdns/server.pub)
+# 3) Setiap akun SSH baru otomatis dapat blok SlowDNS di client-<user>.txt
+```
+- Config tersimpan di `/etc/mb-ssh2/mb.conf`: `SLOWDNS_ENABLED`, `SLOWDNS_DOMAIN`, `SLOWDNS_PORT`, `SLOWDNS_PUBKEY`.
+- Limit IP & bandwidth **tetap berlaku** di jalur SlowDNS.
 
 ## Menu CLI & Bot Telegram
 **Menu CLI** (nomor lengkap):

@@ -183,6 +183,7 @@ class Edge:
         self.warp_status = "off"
         self.started = time.time()
         self._api_hits = {}        # ip -> [timestamps]
+        self._pending_known_ips = {}   # user -> set(ip) dipersist dari stats.json utk restore
         self._stopping = False
 
     def load_cfg(self):
@@ -257,20 +258,54 @@ class Edge:
     def flush_stats(self):
         try:
             os.makedirs(os.path.dirname(STATS_FILE), exist_ok=True)
+            # simpan known_ips per user (set → list) supaya limit IP survive restart
+            dump = {u: dict(s) for u, s in self.stats.items()}
+            for name, ustate in self.users.items():
+                dump.setdefault(name, {})["known_ips"] = sorted(ustate.get("known_ips", set()))
+                dump[name].pop("known_ips_count", None)
             with open(STATS_FILE, "w") as f:
-                json.dump(self.stats, f, indent=1)
+                json.dump(dump, f, indent=1)
         except OSError as e:
             LOG(f"flush stats gagal: {e}")
 
     def load_stats(self):
         try:
             with open(STATS_FILE) as f:
-                self.stats = json.load(f)
-            for s in self.stats.values():
-                s["active"] = 0
-            LOG(f"stats dipulihkan: {len(self.stats)} user")
+                loaded = json.load(f)
+            self.stats = {}
+            restored_ip = 0
+            for name, s in loaded.items():
+                if not isinstance(s, dict):
+                    continue
+                st = {"in": s.get("in", 0), "out": s.get("out", 0),
+                      "sessions": s.get("sessions", 0), "active": 0}
+                self.stats[name] = st
+                kips = s.get("known_ips") or []
+                if isinstance(kips, list) and kips:
+                    ustate = self.users.get(name)
+                    if ustate is None:
+                        # edge belum restore user ini — simpan sementara untuk dipakai restore add_user
+                        self._pending_known_ips[name] = set(kips)
+                    else:
+                        ustate["known_ips"] = set(kips)
+                    restored_ip += len(kips)
+            LOG(f"stats dipulihkan: {len(self.stats)} user, {restored_ip} known-ip")
         except (FileNotFoundError, json.JSONDecodeError):
             self.stats = {}
+
+    def recover_stats(self):
+        """Tarik known_ips yang tersimpan (dari stats.json) ke self.users.
+        Dipanggil setelah restore() — reload field lanjutan yang tersimpan."""
+        recovered = 0
+        for name, kips in self._pending_known_ips.items():
+            ustate = self.users.get(name)
+            if ustate is not None:
+                ustate["known_ips"] = set(kips)
+                recovered += len(kips)
+                LOG(f"RECOVER known_ips {name}: {len(kips)}")
+        self._pending_known_ips = {}
+        if recovered:
+            LOG(f"known_ips dipulihkan total: {recovered}")
 
     async def stats_loop(self):
         while not self._stopping:
@@ -442,7 +477,7 @@ class Edge:
             "expire_ts": int(spec.get("expire_ts", 0) or 0),
             "blocked": None,
             "ip_limit": max(0, ip_limit),   # 0 = unlimited
-            "known_ips": set(),
+            "known_ips": self._pending_known_ips.pop(user, set()),
         }
 
         async def handler(r, w, u=u):
@@ -1022,6 +1057,7 @@ class Edge:
         await self.serve_ctl()
         await self.start_common()
         await self.restore()
+        self.recover_stats()    # tarik known_ips tersimpan ke self.users setelah restore
         await self.serve_api()
         LOG(f"edge up. control={CTL_PATH} cfg={CFG_PATH} ver={VERSION}")
         tasks = [asyncio.create_task(self.stats_loop()),

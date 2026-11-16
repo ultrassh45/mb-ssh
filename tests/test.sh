@@ -13,6 +13,10 @@ check(){ # check <desc> <expr-result-0-is-ok>
 echo "=== 0. syntax ==="
 bash -n $V2/mb-ssh2.sh && python3 -m py_compile $V2/mb-edge.py; check $? "syntax semua file"
 
+echo "=== 0b. LIMIT IP & SLOWDNS (unit) ==="
+python3 $REPO/tests/test_ip_limit.py 2>&1 | grep -q "SEMUA TEST LIMIT IP LULUS"
+check $? "unit: limit IP + persist known_ips + default config"
+
 # cleanup proses lama di port test + user test yang mungkin tersisa dari run yang diterminasi paksa
 for p in 29999 29001 29002 29003 29004 29005 29006 29007 29499; do
   for pid in $(ss -ltnp 2>/dev/null | grep ":$p " | grep -oP 'pid=\K[0-9]+' | sort -u); do kill $pid 2>/dev/null; done
