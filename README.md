@@ -35,10 +35,9 @@ SATU command — clone langsung ke lokasi kanonik, tanpa cd:
 git clone https://github.com/ultrassh45/mb-ssh.git /root/mb-ssh && bash /root/mb-ssh/run.sh
 # tambah --warp utk exit IP Cloudflare per-user (opsional)
 ```
-> Repo **PRIVATE** — perlu akses (PAT/token) utk clone. Satu repo = satu node (atau
-> satu source utk semua node kamu; config per-node ada di `/etc/mb-ssh2/*`, tak
-> ditimpa update). **OS: Ubuntu 20+/Debian 10+** (validasi otomatis; lain → error jelas).
-> `run.sh` mendeteksi lokasinya sendiri via `$BASH_SOURCE` → tak perlu `cd`.
+> Satu repo = satu node (atau satu source utk semua node kamu; config per-node ada di
+> `/etc/mb-ssh2/*`, tak ditimpa update). **OS: Ubuntu 20+/Debian 10+** (validasi otomatis;
+> lain → error jelas). `run.sh` mendeteksi lokasinya sendiri via `$BASH_SOURCE` → tak perlu `cd`.
 
 Update node (idempotent, config user tak tersentuh) — **tanpa perlu tahu path, tanpa cd**:
 ```bash
