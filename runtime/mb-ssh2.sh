@@ -1362,7 +1362,7 @@ esac
 do_slowdns() {
   # Setup SlowDNS — aktif/nonaktif + domain + pubkey (disimpan di mb.conf)
   # SLOWDNS_ENABLED=1 → setiap akun SSH baru otomatis dpt blok SlowDNS di client-info.
-  # Server slowdns di-install terpisah (/root/slowdns/install.sh); di sini cuma config.
+  # Server slowdns di-install terpisah (install/05-slowdns.sh); di sini cuma config.
   echo "--- SETUP SLOWDNS ---"
   echo "Status: $([ "${SLOWDNS_ENABLED:-0}" == "1" ] && echo AKTIF || echo NONAKTIF)"
   echo "  Domain  : ${SLOWDNS_DOMAIN:-<kosong>}"
@@ -1376,9 +1376,9 @@ do_slowdns() {
       dm="${dm:-$SLOWDNS_DOMAIN}"
       [[ -n $dm ]] || { log "domain kosong — batal"; return 1; }
       read -rp "UDP port [${SLOWDNS_PORT:-53}]: " pt; pt="${pt:-${SLOWDNS_PORT:-53}}"
-      read -rp "Public key (/root/slowdns/server.pub, enter=baca otomatis): " pk
-      if [[ -z $pk && -f /root/slowdns/server.pub ]]; then
-        pk=$(tr -d '\r\n' < /root/slowdns/server.pub)
+      read -rp "Public key (/etc/mb-ssh2/slowdns.pubkey, enter=baca otomatis): " pk
+      if [[ -z $pk && -f /etc/mb-ssh2/slowdns.pubkey ]]; then
+        pk=$(tr -d '\r\n' < /etc/mb-ssh2/slowdns.pubkey)
       fi
       _conf_set SLOWDNS_ENABLED "1"
       _conf_set SLOWDNS_DOMAIN "$dm"
@@ -1386,7 +1386,7 @@ do_slowdns() {
       [[ -n $pk ]] && _conf_set SLOWDNS_PUBKEY "$pk"
       log "SlowDNS AKTIF: $dm:$pt (pubkey ${pk:+tersimpan}${pk:-BELUM})"
       if [[ -z $pk ]]; then
-        echo "  !! Pubkey belum tersimpan. Baca dari server: cat /root/slowdns/server.pub"
+        echo "  !! Pubkey belum tersimpan. Baca dari server: cat /etc/mb-ssh2/slowdns.pubkey"
       fi
       ;;
     *)
@@ -1396,7 +1396,8 @@ do_slowdns() {
   esac
   echo ""
   echo "Catatan:"
-  echo " 1) Install server slowdns: mkdir -p /root/slowdns && cp binary /root/slowdns/ && bash /root/slowdns/install.sh"
-  echo " 2) Upstream slowdns = 127.0.0.1:22022 (dropbear) — sama dgn jalur SSH biasa."
-  echo " 3) Limit IP & bandwidth TETAP berlaku."
+  echo " 1) Install server slowdns: bash install/05-slowdns.sh — binary & pubkey dari repo dist/slowdns/, dipasang otomatis saat run.sh"
+  echo " 2) Binary: /usr/local/bin/mb-slowdns-server — unit: systemctl status mb-slowdns"
+  echo " 3) Upstream slowdns = 127.0.0.1:22022 (dropbear) — sama dgn jalur SSH biasa."
+  echo " 4) Limit IP & bandwidth TETAP berlaku."
 }

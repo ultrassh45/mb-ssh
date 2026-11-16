@@ -90,13 +90,16 @@ mb-ssh2 set user --ip-limit <N>      # ubah saat akun aktif
 
 ### SlowDNS
 ```bash
-# 1) Install server slowdns (binary terpisah, bukan dari repo):
-mkdir -p /root/slowdns && cp <slowdns-binary> /root/slowdns/ && bash /root/slowdns/install.sh
-#    upstream = 127.0.0.1:22022 (dropbear) — sama dgn jalur SSH biasa
-# 2) Aktifkan di panel akun:
-mb-ssh2 menu        # → 19) Setup SlowDNS → isi domain + pubkey (baca dari /root/slowdns/server.pub)
+# 1) Auto-install server SlowDNS (binary di repo dist/slowdns/ — TANPA token/curl remote):
+#    Taruh binary di dist/slowdns/server + aktifkan, lalu jalankan lagi:
+#    - binary repo: copy slowdns-amd64 (atau slowdns-arm64) → dist/slowdns/server
+#    - setup:  mb-ssh2 menu → 19) Setup SlowDNS → domain + pubkey (dari /etc/mb-ssh2/slowdns.pubkey)
+#    - lalu:   bash install/05-slowdns.sh   (otomatis install unit systemd + keygen + start)
+#    Atau aktifkan dari awal via run.sh:  SLOWDNS_ENABLED=1 di /etc/mb-ssh2/mb.conf
+# 2) Tiap run.sh (update node) → 05-slowdns.sh jalan otomatis kalau SLOWDNS_ENABLED=1
 # 3) Setiap akun SSH baru otomatis dapat blok SlowDNS di client-<user>.txt
 ```
+- Binary + installer kini **di dalam repo** (`dist/slowdns/` + `install/05-slowdns.sh`) — tidak perlu download/cp manual lagi.
 - Config tersimpan di `/etc/mb-ssh2/mb.conf`: `SLOWDNS_ENABLED`, `SLOWDNS_DOMAIN`, `SLOWDNS_PORT`, `SLOWDNS_PUBKEY`.
 - Limit IP & bandwidth **tetap berlaku** di jalur SlowDNS.
 

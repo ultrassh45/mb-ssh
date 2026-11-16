@@ -129,6 +129,12 @@ if grep -Eq '^TG_BOT_TOKEN=".{5,}"' /etc/mb-ssh2/mb.conf 2>/dev/null; then
 fi
 sleep 1
 
+# ---------- 3b. SlowDNS (opsional — hanya kalau SLOWDNS_ENABLED=1) ----------
+# binary dari repo dist/slowdns/ — tanpa token/curl remote. Default off (aman).
+if [ -f "$ROOT/install/05-slowdns.sh" ]; then
+  bash "$ROOT/install/05-slowdns.sh" || log "SlowDNS setup skip/gagal (jangan-blokir node)"
+fi
+
 # ---------- 4. Cron + verifikasi ----------
 log "Step 4/4: Cron cleanup + verify..."
 if ! crontab -l 2>/dev/null | grep -q "mb-ssh2-cleanup"; then
