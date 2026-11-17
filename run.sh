@@ -23,7 +23,8 @@ REPO_TGZ="${REPO_TGZ:-https://codeload.github.com/ultrassh45/mb-ssh/tar.gz/refs/
 REPO_BRANCH="${REPO_BRANCH:-main}"
 SRC_DIR="${SRC_DIR:-/root/mb-ssh}"
 DOWNLOAD_MODE="${DOWNLOAD_MODE:-tar}"   # tar (default, tanpa git) | git
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# BASH_SOURCE kosong saat script di-pipe ke bash (curl | bash) → jangan pakai set -u di sini
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-./__piped__}")" 2>/dev/null && pwd)"
 if [[ "$ROOT" != "$SRC_DIR" ]] && [[ ! -d "$ROOT/.git" ]] && [[ ! -f "$ROOT/run.sh" ]]; then
   # dijalankan lewat pipa curl (bukan repo lokal) → self-install repo
   SRC="$SRC_DIR"
