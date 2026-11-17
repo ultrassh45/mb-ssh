@@ -1,8 +1,10 @@
 #!/bin/bash
 # mb-ssh — installer node VPN (Marzban) + SSH product (edge + dropbear + stunnel + udpgw)
 #
-# One-liner:
-#   bash <(curl -fsSL https://raw.githubusercontent.com/ultrassh45/mb-ssh/main/run.sh)
+# One-liner (TANPA git di VPS — pakai arsip tar.gz):
+#   curl -fsSL https://raw.githubusercontent.com/ultrassh45/mb-ssh/main/run.sh | bash
+# Alternatif (kalau git tersedia):
+#   git clone https://github.com/ultrassh45/mb-ssh.git /root/mb-ssh && bash /root/mb-ssh/run.sh
 # Lokal:
 #   bash run.sh [--warp] [--no-marzban]
 #
@@ -15,19 +17,41 @@
 
 set -euo pipefail
 
-# ---------- self-bootstrap (one-liner via curl → clone & re-exec) ----------
+# ---------- self-bootstrap (dua mode: tar.gz default [tanpa git], git opsional) ----------
 REPO_URL="${REPO_URL:-https://github.com/ultrassh45/mb-ssh.git}"
+REPO_TGZ="${REPO_TGZ:-https://codeload.github.com/ultrassh45/mb-ssh/tar.gz/refs/heads/main}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 SRC_DIR="${SRC_DIR:-/root/mb-ssh}"
+DOWNLOAD_MODE="${DOWNLOAD_MODE:-tar}"   # tar (default, tanpa git) | git
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ "$ROOT" != "$SRC_DIR" ]] && [[ ! -f "$ROOT/.git" && ! -d "$ROOT/.git" ]]; then
-  # dijalankan lewat pipa curl (bukan clone lokal) → self-install repo
+if [[ "$ROOT" != "$SRC_DIR" ]] && [[ ! -d "$ROOT/.git" ]] && [[ ! -f "$ROOT/run.sh" ]]; then
+  # dijalankan lewat pipa curl (bukan repo lokal) → self-install repo
   SRC="$SRC_DIR"
-  if [[ ! -d "$SRC/.git" ]]; then
-    command -v git >/dev/null || { apt-get update -q && apt-get install -y -q git; }
-    git clone -q --depth 1 -b "$REPO_BRANCH" "$REPO_URL" "$SRC"
-  else
-    git -C "$SRC" fetch -q origin "$REPO_BRANCH" && git -C "$SRC" reset -q --hard "origin/$REPO_BRANCH"
+  if [[ ! -f "$SRC/run.sh" ]]; then
+    if [[ "$DOWNLOAD_MODE" == "git" ]]; then
+      command -v git >/dev/null || { apt-get update -q && apt-get install -y -q git; }
+      git clone -q --depth 1 -b "$REPO_BRANCH" "$REPO_URL" "$SRC"
+    else
+      # Mode tar: TIDAK butuh git. fallback curl → wget → python3
+      tmp="$(mktemp -d)"; ok=0
+      if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 20 --max-time 180 "$REPO_TGZ" -o "$tmp/repo.tar.gz" && ok=1 || ok=0
+      fi
+      if [[ $ok -eq 0 ]] && command -v wget >/dev/null 2>&1; then
+        wget -q --timeout=20 -O "$tmp/repo.tar.gz" "$REPO_TGZ" && ok=1 || ok=0
+      fi
+      if [[ $ok -eq 0 ]] && command -v python3 >/dev/null 2>&1; then
+        python3 - "$REPO_TGZ" "$tmp/repo.tar.gz" <<'PYEOF' && ok=1 || ok=0
+import sys, urllib.request
+urllib.request.urlretrieve(sys.argv[1], sys.argv[2])
+PYEOF
+      fi
+      [[ $ok -eq 1 ]] || { echo "[mb-ssh] gagal unduh repo (curl/wget/python3 tidak ada atau jaringan)" >&2; rm -rf "$tmp"; exit 1; }
+      mkdir -p "$SRC"
+      tar -xzf "$tmp/repo.tar.gz" -C "$SRC" --strip-components=1 || { rm -rf "$tmp"; exit 1; }
+      rm -rf "$tmp"
+      echo -e "\033[1;32m[mb-ssh]\033[0m repo terpasang via arsip tar.gz ($SRC)"
+    fi
   fi
   exec bash "$SRC/run.sh" "$@"
 fi
