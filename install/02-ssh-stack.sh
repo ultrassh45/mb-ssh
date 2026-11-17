@@ -101,6 +101,11 @@ else
   if [[ -x "$DROPBEAR_DIR/dropbearmulti-${PICKED}" ]]; then
     ln -sfn "$DROPBEAR_DIR/dropbearmulti-${PICKED}" /usr/local/bin/dropbearmulti || true
   fi
+  # dropbearkey WAJIB: pembuat host key (tanpa ini dropbear mati "No hostkeys available")
+  if [[ -x "/opt/dropbear/src/dropbear-DROPBEAR_${PICKED}/dropbearkey" ]]; then
+    install -m 755 "/opt/dropbear/src/dropbear-DROPBEAR_${PICKED}/dropbearkey" "$DROPBEAR_DIR/dropbearkey-${PICKED}" \
+      && ln -sfn "$DROPBEAR_DIR/dropbearkey-${PICKED}" /usr/local/bin/dropbearkey || true
+  fi
   log "dropbear aktif: ${PICKED} (${BA})"
 fi
 
@@ -158,6 +163,41 @@ rm -rf /tmp/badvpn-1.999.130 /tmp/badvpn.tar.gz 2>/dev/null || true
 
 # ---------- dropbear client (127.0.0.1:22022) ----------
 log "dropbear 127.0.0.1:22022 (client backend)..."
+
+# Host keys WAJIB ada — tanpa ini dropbear langsung mati:
+#   "Early exit: No hostkeys available. 'dropbear -R' may be useful"
+mkdir -p /etc/dropbear
+chmod 700 /etc/dropbear
+DBKEY="$(command -v dropbearkey || echo /usr/local/bin/dropbearkey)"
+[[ -x "$DBKEY" ]] || DBKEY=/usr/local/bin/dropbearmulti
+# ed25519 baru ada di dropbear >= 2020.79; 2019.78 -> rsa+ecdsa saja
+DB_VER_OK=0
+[[ "${PICKED:-}" == 2019.* ]] || DB_VER_OK=1
+KEYTYPES="rsa ecdsa"
+[[ $DB_VER_OK -eq 1 ]] && KEYTYPES="rsa ecdsa ed25519"
+for kt in $KEYTYPES; do
+  case $kt in
+    rsa)     kf=/etc/dropbear/dropbear_rsa_host_key;     arg=rsa;     bits="-s 2048" ;;
+    ecdsa)   kf=/etc/dropbear/dropbear_ecdsa_host_key;   arg=ecdsa;   bits="-s 256" ;;
+    ed25519) kf=/etc/dropbear/dropbear_ed25519_host_key; arg=ed25519; bits="" ;;
+  esac
+  if [[ ! -s "$kf" ]]; then
+    if [[ "$DBKEY" == *dropbearmulti ]]; then
+      "$DBKEY" dropbearkey -t $arg $bits -f "$kf" >/dev/null 2>&1 || log "hostkey $kt gagal"
+    else
+      "$DBKEY" -t $arg $bits -f "$kf" >/dev/null 2>&1 || log "hostkey $kt gagal"
+    fi
+    chmod 600 "$kf" 2>/dev/null || true
+  fi
+done
+_ls_keys=$(ls /etc/dropbear/*host_key 2>/dev/null | wc -l)
+if [[ $_ls_keys -gt 0 ]]; then
+  log "host keys siap ($_ls_keys key di /etc/dropbear)"
+else
+  # fallback: -R = generate otomatis saat start
+  log "PERINGATAN: host key tidak terbentuk — pakai -R (generate runtime)"
+fi
+
 # disable sistem dropbear default (admin sshd tetap di port 22 via openssh)
 if grep -qE "^NO_START=" /etc/default/dropbear 2>/dev/null; then
   sed -i 's/^NO_START=.*/NO_START=1/' /etc/default/dropbear
@@ -175,9 +215,42 @@ if [[ ! -f /etc/mb-ssh2/cert.pem ]]; then
     -subj "/CN=ssh-node" 2>/dev/null
   chmod 600 /etc/mb-ssh2/key.pem
 fi
-mkdir -p /etc/stunnel
+mkdir -p /etc/stunnel /var/log/stunnel /var/run/stunnel4
+# 1) config utk SysV init Debian (butuh pid=, TIDAK boleh foreground)
 install -m 644 "$ROOT/config/stunnel-mb-ssh.conf" /etc/stunnel/mb-ssh.conf \
   || log "PERINGATAN: config stunnel gagal dipasang (SSH TLS nonaktif)"
+# 2) config utk unit systemd native kita (foreground=yes, TANPA pid=)
+cat > /etc/mb-ssh2/stunnel-systemd.conf <<'STEOF'
+foreground = yes
+output = /var/log/stunnel/mb-ssh.log
+cert = /etc/mb-ssh2/cert.pem
+key = /etc/mb-ssh2/key.pem
+
+[mb-ssh]
+accept  = 127.0.0.1:22443
+connect = 127.0.0.1:22022
+client  = no
+STEOF
+
+# 3) unit systemd sendiri (lebih andal daripada SysV stunnel4.service)
+cat > /etc/systemd/system/mb-stunnel.service <<'STUNIT'
+[Unit]
+Description=mb-stunnel — SSH TLS backend (127.0.0.1:22443 -> dropbear 22022)
+After=network.target dropbear-client.service
+Wants=dropbear-client.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/stunnel4 /etc/mb-ssh2/stunnel-systemd.conf
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+STUNIT
+systemctl daemon-reload 2>/dev/null || true
+systemctl disable stunnel4 >/dev/null 2>&1 || true
+log "stunnel: /etc/stunnel/mb-ssh.conf (SysV) + mb-stunnel.service (systemd)"
 
 # ---------- WARP (optional) ----------
 if [[ "$WARP" == "1" ]]; then

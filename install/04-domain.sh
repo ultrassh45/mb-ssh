@@ -18,9 +18,9 @@ CONF="/etc/mb-ssh2/mb.conf"
 
 # nama unit stunnel: Debian/Ubuntu = stunnel4, distro lain = stunnel
 stunnel_unit() {
-  if systemctl list-unit-files 2>/dev/null | grep -q '^stunnel4\.service'; then echo stunnel4
-  elif systemctl list-unit-files 2>/dev/null | grep -q '^stunnel\.service'; then echo stunnel
-  else echo stunnel4; fi
+  if systemctl list-unit-files 2>/dev/null | grep -q '^mb-stunnel\.service'; then echo mb-stunnel
+  elif systemctl list-unit-files 2>/dev/null | grep -q '^stunnel4\.service'; then echo stunnel4
+  else echo stunnel; fi
 }
 [[ -f "$CONF" ]] || { echo "[domain] mb.conf tidak ada — jalankan run.sh dahulu" >&2; exit 2; }
 
