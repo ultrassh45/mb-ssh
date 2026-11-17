@@ -114,35 +114,47 @@ case $ARCH in
   aarch64) BA=arm64 ;;
   *) die "arch $ARCH tidak didukung" ;;
 esac
-if [[ ! -x /usr/local/bin/badvpn-udpgw ]]; then
-  curl -fsSL --max-time 60 "https://raw.githubusercontent.com/superdecrypt-dev/autoscript/main/opt/badvpn/dist/badvpn-udpgw-linux-$BA" \
-    -o /usr/local/bin/badvpn-udpgw 2>/dev/null
-  chmod +x /usr/local/bin/badvpn-udpgw 2>/dev/null
+
+# verifikasi prebuilt: binary harus bisa mencetak help (exit 0)
+_badvpn_ok() {
+  [[ -x /usr/local/bin/badvpn-udpgw ]] || return 1
+  timeout 5 /usr/local/bin/badvpn-udpgw --help >/dev/null 2>&1
+}
+
+if ! _badvpn_ok; then
+  rm -f /usr/local/bin/badvpn-udpgw
+  curl -fsSL --max-time 90 "https://raw.githubusercontent.com/superdecrypt-dev/autoscript/main/opt/badvpn/dist/badvpn-udpgw-linux-$BA" \
+    -o /usr/local/bin/badvpn-udpgw 2>/dev/null || true
+  chmod +x /usr/local/bin/badvpn-udpgw 2>/dev/null || true
 fi
-# verifikasi prebuilt: harus bisa start error-free
-if ! timeout 3 /usr/local/bin/badvpn-udpgw --help >/dev/null 2>&1 || \
-   ! timeout 2 /usr/local/bin/badvpn-udpgw >/dev/null 2>&1; then
+
+if ! _badvpn_ok; then
   log "prebuilt badvpn gagal (glibc?) — build dari source..."
-  apt-get install -y -qq cmake pkg-config libssl-dev gcc make >/dev/null 2>&1
-  curl -fsSL --max-time 90 "https://github.com/ambrop72/badvpn/archive/refs/tags/1.999.130.tar.gz" -o /tmp/badvpn.tar.gz
-  rm -rf /tmp/badvpn-1.999.130
-  tar xzf /tmp/badvpn.tar.gz -C /tmp
-  (
-    cd /tmp/badvpn-1.999.130
-    cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_NOTHING_BY_DEFAULT=ON -DBUILD_UDPGW=ON . >/dev/null 2>&1
-    make >/dev/null 2>&1
-  )
-  if [[ -x /tmp/badvpn-1.999.130/udpgw/badvpn-udpgw ]]; then
-    install -m 755 /tmp/badvpn-1.999.130/udpgw/badvpn-udpgw /usr/local/bin/badvpn-udpgw
-    rm -rf /tmp/badvpn-1.999.130 /tmp/badvpn.tar.gz
-    log "badvpn build source OK"
+  apt-get install -y -qq cmake pkg-config libssl-dev gcc make >/dev/null 2>&1 || true
+  rm -rf /tmp/badvpn-1.999.130 /tmp/badvpn.tar.gz
+  if curl -fsSL --max-time 120 "https://github.com/ambrop72/badvpn/archive/refs/tags/1.999.130.tar.gz" -o /tmp/badvpn.tar.gz 2>/dev/null \
+     && tar xzf /tmp/badvpn.tar.gz -C /tmp 2>/dev/null; then
+    (
+      cd /tmp/badvpn-1.999.130 || exit 1
+      cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_NOTHING_BY_DEFAULT=ON -DBUILD_UDPGW=ON . >/tmp/badvpn-cmake.log 2>&1
+      make -j"$(nproc)" >/tmp/badvpn-make.log 2>&1
+    ) || log "build badvpn gagal (lihat /tmp/badvpn-cmake.log, /tmp/badvpn-make.log)"
+    if [[ -x /tmp/badvpn-1.999.130/udpgw/badvpn-udpgw ]]; then
+      install -m 755 /tmp/badvpn-1.999.130/udpgw/badvpn-udpgw /usr/local/bin/badvpn-udpgw
+      log "badvpn build source OK"
+    fi
   else
-    die "badvpn-udpgw: prebuilt gagal DAN build source gagal"
+    log "unduh/extrak source badvpn gagal (jaringan?)"
   fi
-else
-  log "badvpn prebuilt OK"
+  [[ -x /usr/local/bin/badvpn-udpgw ]] || log "PERINGATAN: badvpn-udpgw tidak tersedia — UDPGW akan di-skip (node tetap jalan)"
 fi
-log "badvpn ok: $(/usr/local/bin/badvpn-udpgw 2>&1 | head -1 || echo terpasang)"
+
+if _badvpn_ok; then
+  log "badvpn ok: $(/usr/local/bin/badvpn-udpgw 2>&1 | head -1 || echo terpasang)"
+else
+  log "badvpn TIDAK terpasang — lanjut tanpa UDPGW (bisa diulang: bash install/02-ssh-stack.sh)"
+fi
+rm -rf /tmp/badvpn-1.999.130 /tmp/badvpn.tar.gz 2>/dev/null || true
 
 # ---------- dropbear client (127.0.0.1:22022) ----------
 log "dropbear 127.0.0.1:22022 (client backend)..."
@@ -163,7 +175,9 @@ if [[ ! -f /etc/mb-ssh2/cert.pem ]]; then
     -subj "/CN=ssh-node" 2>/dev/null
   chmod 600 /etc/mb-ssh2/key.pem
 fi
-install -m 644 "$ROOT/config/stunnel-mb-ssh.conf" /etc/stunnel/mb-ssh.conf
+mkdir -p /etc/stunnel
+install -m 644 "$ROOT/config/stunnel-mb-ssh.conf" /etc/stunnel/mb-ssh.conf \
+  || log "PERINGATAN: config stunnel gagal dipasang (SSH TLS nonaktif)"
 
 # ---------- WARP (optional) ----------
 if [[ "$WARP" == "1" ]]; then
@@ -174,8 +188,8 @@ if [[ "$WARP" == "1" ]]; then
     CODENAME=$(lsb_release -cs 2>/dev/null || echo jammy)
     echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $CODENAME main" \
       > /etc/apt/sources.list.d/cloudflare-client.list
-    apt-get update -qq
-    apt-get install -y -qq cloudflare-warp >/dev/null
+    apt-get update -qq || true
+    apt-get install -y -qq cloudflare-warp >/dev/null || log "WARP gagal dipasang (skip)"
   fi
   if ! warp-cli --registered 2>/dev/null | grep -q Yes; then
     log "WARP belum diregister — jalankan: warp-cli register --activation-key <K>"
