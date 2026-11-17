@@ -50,7 +50,10 @@ PYEOF
       mkdir -p "$SRC"
       tar -xzf "$tmp/repo.tar.gz" -C "$SRC" --strip-components=1 || { rm -rf "$tmp"; exit 1; }
       rm -rf "$tmp"
-      echo -e "\033[1;32m[mb-ssh]\033[0m repo terpasang via arsip tar.gz ($SRC)"
+      # catat revisi utk cek update (tanpa git): commit sha terakhir di main
+      curl -fsSL --max-time 15 "https://api.github.com/repos/ultrassh45/mb-ssh/commits/main" 2>/dev/null \
+        | python3 -c "import sys,json;print(json.load(sys.stdin).get('sha','')[:7])" > "$SRC/VERSION_REV" 2>/dev/null || echo "unknown" > "$SRC/VERSION_REV"
+      echo -e "\033[1;32m[mb-ssh]\033[0m repo terpasang via arsip tar.gz ($SRC, rev $(cat "$SRC/VERSION_REV"))"
     fi
   fi
   exec bash "$SRC/run.sh" "$@"

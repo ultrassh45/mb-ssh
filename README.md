@@ -1,6 +1,6 @@
 # mb-ssh — node VPN (Marzban) + SSH product
 
-Satu repo = satu node. Installer satu baris, update = `git pull && bash run.sh`.
+Satu repo = satu node. Installer satu baris (tanpa git), update = `mb-ssh2 update`.
 
 ## Layout
 ```
@@ -30,19 +30,21 @@ legacy/v1/                  ← versi lama (Marzban-sync), arsip
 ```
 
 ## Install (node baru)
-SATU command — clone langsung ke lokasi kanonik, tanpa cd:
+SATU command — **tanpa git**, unduh arsip repo langsung:
 ```bash
-git clone https://github.com/ultrassh45/mb-ssh.git /root/mb-ssh && bash /root/mb-ssh/run.sh
-# tambah --warp utk exit IP Cloudflare per-user (opsional)
+curl -fsSL https://raw.githubusercontent.com/ultrassh45/mb-ssh/main/run.sh | bash
+# tambah --warp utk exit IP Cloudflare per-user (opsional):
+# curl -fsSL .../run.sh | bash -s -- --warp
+# kalau VPS punya git dan mau mode git: DOWNLOAD_MODE=git curl -fsSL .../run.sh | bash
 ```
-> Satu repo = satu node (atau satu source utk semua node kamu; config per-node ada di
-> `/etc/mb-ssh2/*`, tak ditimpa update). **OS: Ubuntu 20+/Debian 10+** (validasi otomatis;
-> lain → error jelas). `run.sh` mendeteksi lokasinya sendiri via `$BASH_SOURCE` → tak perlu `cd`.
+> VPS tanpa git tetap jalan — bootstrap mengunduh tarball (`codeload`), fallback
+> curl → wget → python3. Satu repo = satu node (config per-node di `/etc/mb-ssh2/*`,
+> tak ditimpa update). **OS: Ubuntu 20+/Debian 10+** (validasi otomatis; lain → error jelas).
 
 Update node (idempotent, config user tak tersentuh) — **tanpa perlu tahu path, tanpa cd**:
 ```bash
-mb-ssh2 update           # git pull + reinstall runtime + verify, auto-rollback kalau gagal
-# kalau CLI belum terpasang: cd /root/mb-ssh && git pull && bash run.sh
+mb-ssh2 update           # unduh versi terbaru + reinstall runtime + verify, auto-rollback kalau gagal
+# kalau CLI belum terpasang: curl -fsSL https://raw.githubusercontent.com/ultrassh45/mb-ssh/main/install.sh | bash --update
 ```
 - Config existing (`/etc/mb-ssh2/*`) TIDAK ditimpa
 - User existing TIDAK hilang (state: `/var/lib/mb-ssh/users.json`)

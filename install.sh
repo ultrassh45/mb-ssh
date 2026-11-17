@@ -55,7 +55,10 @@ PYEOF
   mkdir -p "$DEST"
   tar -xzf "$tmp/repo.tar.gz" -C "$DEST" --strip-components=1 || { rm -rf "$tmp"; die "gagal ekstrak arsip"; }
   rm -rf "$tmp"
-  log "repo terpasang di $DEST"
+  # catat revisi utk cek update (tanpa git)
+  curl -fsSL --max-time 15 "https://api.github.com/repos/ultrassh45/mb-ssh/commits/main" 2>/dev/null \
+    | python3 -c "import sys,json;print(json.load(sys.stdin).get('sha','')[:7])" > "$DEST/VERSION_REV" 2>/dev/null || echo "unknown" > "$DEST/VERSION_REV"
+  log "repo terpasang di $DEST (rev $(cat "$DEST/VERSION_REV"))"
 fi
 
 exec bash "$DEST/run.sh" "${@:2}"

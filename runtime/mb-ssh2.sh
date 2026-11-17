@@ -607,25 +607,20 @@ do_restore() {
 }
 
 _update_check() {
-  # bandingkan commit local runtime dengan origin/<branch>.
+  # Update tanpa git: bandingkan commit remote (GitHub API) vs versi lokal (file VERSION_REV).
   # Keluar 0 = update tersedia (cache rincian ditulis), 1 = sudah terbaru,
-  # 2 = repo tak ada / REPO_URL kosong / no git dir (tak bisa cek)
-  command -v git >/dev/null || { echo "git tidak ada"; return 2; }
+  # 2 = tak bisa cek (REPO_URL kosong / jaringan)
   [[ -z $REPO_URL ]] && { echo "REPO_URL kosong — set via setup"; return 2; }
-  if [[ ! -d $SRC_DIR/.git ]]; then
-    rm -rf "$SRC_DIR" && mkdir -p "$(dirname "$SRC_DIR")"
-    git clone -q --depth 20 "$REPO_URL" "$SRC_DIR" 2>/dev/null || { echo "clone gagal"; return 2; }
-  fi
-  git -C "$SRC_DIR" fetch -q origin "$REPO_BRANCH" 2>/dev/null || { echo "fetch gagal"; return 2; }
-  local cur new
-  cur=$(git -C "$SRC_DIR" rev-parse --short HEAD 2>/dev/null)
-  new=$(git -C "$SRC_DIR" rev-parse --short "origin/$REPO_BRANCH" 2>/dev/null)
-  if [[ -n $cur && $cur != $new ]]; then
+  local api="https://api.github.com/repos/ultrassh45/mb-ssh/commits/${REPO_BRANCH:-main}"
+  local remote="" cur=""
+  remote=$(curl -fsSL --max-time 15 "$api" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('sha','')[:7])" 2>/dev/null || true)
+  [[ -n $remote ]] || remote=$(wget -qO- --timeout=15 "$api" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('sha','')[:7])" 2>/dev/null || true)
+  [[ -n $remote ]] || { echo "gagal cek remote (jaringan?)"; return 2; }
+  cur=$(cat "$SRC_DIR/VERSION_REV" 2>/dev/null || echo "unknown")
+  if [[ "$cur" != "$remote" ]]; then
     mkdir -p "$(dirname "$UPDATE_CACHE")" 2>/dev/null
-    git -C "$SRC_DIR" log --oneline -8 "$cur..origin/$REPO_BRANCH" > "$UPDATE_CACHE" 2>/dev/null
-    echo "HEAD_NEW=$new" >> "$UPDATE_CACHE"
-    echo "HELPER_CACHE=1" >> "$UPDATE_CACHE"
-    echo "UPDATE:$cur→$new ($(git -C "$SRC_DIR" log --oneline -1 "$new" | head -1))"
+    { echo "UPDATE:${cur}→${remote}"; echo "HEAD_NEW=$remote"; echo "HELPER_CACHE=1"; } > "$UPDATE_CACHE"
+    echo "UPDATE:${cur}→${remote}"
     return 0
   fi
   rm -f "$UPDATE_CACHE" 2>/dev/null
@@ -690,11 +685,31 @@ do_update() {
   [[ $rc -eq 0 ]] || { log "update --check gagal (rc=$rc)"; return 1; }
   rb=$(_snapshot)
   log "update tersedia — snapshot $rb"
-  # sinkronkan worktree ke origin (fetch saja tidak update working tree)
-  git -C "$SRC_DIR" fetch -q origin "$REPO_BRANCH" 2>/dev/null || { log "fetch ulang gagal — abort"; return 1; }
-  git -C "$SRC_DIR" reset -q --hard "origin/$REPO_BRANCH" 2>/dev/null || { log "reset gagal — abort"; return 1; }
+  # unduh repo versi terbaru via arsip tar.gz (TANPA git)
+  local tgz="https://codeload.github.com/ultrassh45/mb-ssh/tar.gz/refs/heads/${REPO_BRANCH:-main}"
+  local tmp; tmp="$(mktemp -d)"
+  local ok=0
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --connect-timeout 20 --max-time 180 "$tgz" -o "$tmp/repo.tar.gz" && ok=1 || ok=0
+  fi
+  if [[ $ok -eq 0 ]] && command -v wget >/dev/null 2>&1; then
+    wget -q --timeout=20 -O "$tmp/repo.tar.gz" "$tgz" && ok=1 || ok=0
+  fi
+  if [[ $ok -eq 0 ]] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$tgz" "$tmp/repo.tar.gz" <<'PYEOF' && ok=1 || ok=0
+import sys, urllib.request
+urllib.request.urlretrieve(sys.argv[1], sys.argv[2])
+PYEOF
+  fi
+  if [[ $ok -ne 1 ]]; then
+    log "unduh update gagal (jaringan) — abort, tidak ada yang berubah"
+    rm -rf "$tmp"; return 1
+  fi
+  mkdir -p "$SRC_DIR"
+  tar -xzf "$tmp/repo.tar.gz" -C "$SRC_DIR" --strip-components=1 || { log "ekstrak gagal — abort"; rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
   local newrev
-  newrev=$(git -C "$SRC_DIR" rev-parse --short HEAD 2>/dev/null)
+  newrev=$(cat "$SRC_DIR/VERSION_REV" 2>/dev/null || echo "?")
   # pasang runtime baru (config TIDAK pernah ditimpa — run.sh sudah idempotent)
   local f
   for f in mb-ssh2.sh mb-edge.py mb-tgbot.py mb-ssh2-cleanup.sh; do
@@ -958,7 +973,7 @@ except Exception:
   if [[ -z ${1:-} && -z ${2:-} && -z ${3:-} && -z ${4:-} ]]; then
     echo ""
     echo "--- [3/3] Update script (auto-rollback) ---"
-    echo "REPO_URL = git repo script (GitHub private). Biarkan kosong utk skip."
+    echo "REPO_URL = sumber update script (repo GitHub). Biarkan kosong utk skip."
     read -rp "REPO_URL [${REPO_URL:-<kosong>}]: " repou; repou="${repou:-$REPO_URL}"
   else
     repou="${REPO_URL:-}"
@@ -1254,7 +1269,7 @@ do_menu() {
     echo " R2  : ${R2_REMOTE:-<belum diset>}  (${R2_PATH})"
     echo " Bot : ${TG_BOT_TOKEN:+tersambung${TG_CHAT_ID:+ (chat $TG_CHAT_ID)}}${TG_BOT_TOKEN:-<belum diset>}"
     echo " Back: ${BACKUP_INTERVAL:-0} (0 = tiap hari 03:03)"
-    echo " Upd : ${REPO_URL:+sumber git ✓}${REPO_URL:-<belum set — setup>}"
+    echo " Upd : ${REPO_URL:+sumber update ✓}${REPO_URL:-<belum set — setup>}"
     echo " Akun: $counts"
     echo "=============================================="
     echo " 1)  Tambah akun SSH"
