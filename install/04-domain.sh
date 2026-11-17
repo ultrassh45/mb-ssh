@@ -15,6 +15,13 @@ log() { echo -e "\033[1;38;5;79m[domain]\033[0m $*"; }
 die() { echo -e "\033[1;31m[domain]\033[0m $*" >&2; exit 1; }
 
 CONF="/etc/mb-ssh2/mb.conf"
+
+# nama unit stunnel: Debian/Ubuntu = stunnel4, distro lain = stunnel
+stunnel_unit() {
+  if systemctl list-unit-files 2>/dev/null | grep -q '^stunnel4\.service'; then echo stunnel4
+  elif systemctl list-unit-files 2>/dev/null | grep -q '^stunnel\.service'; then echo stunnel
+  else echo stunnel4; fi
+}
 [[ -f "$CONF" ]] || { echo "[domain] mb.conf tidak ada — jalankan run.sh dahulu" >&2; exit 2; }
 
 FORCE="${1:-}"
@@ -142,12 +149,12 @@ if [[ "${S:-1}" != "2" ]]; then
         chmod 600 /etc/mb-ssh2/cert.pem
         log "✓ Let's Encrypt cert aktif utk $DOM"
         if ! crontab -l 2>/dev/null | grep -q "$DOM.*fullchain.pem.*cert.pem"; then
-          (crontab -l 2>/dev/null; echo "17 3 1,19 * * certbot renew --quiet >/dev/null 2>&1 && cat /etc/letsencrypt/live/$DOM/fullchain.pem /etc/letsencrypt/live/$DOM/privkey.pem > /etc/mb-ssh2/cert.pem && systemctl restart stunnel") | crontab -
+          (crontab -l 2>/dev/null; echo "17 3 1,19 * * certbot renew --quiet >/dev/null 2>&1 && cat /etc/letsencrypt/live/$DOM/fullchain.pem /etc/letsencrypt/live/$DOM/privkey.pem > /etc/mb-ssh2/cert.pem && systemctl restart $(stunnel_unit)") | crontab -
           log "renew cron terpasang (2x/bln) utk $DOM"
         fi
         # restart stunnel agar cert baru aktif
-        systemctl restart stunnel 2>/dev/null && log "stunnel di-restart (cert baru aktif)" \
-          || log "restart stunnel gagal (amankah? cek: systemctl status stunnel)"
+        systemctl restart "$(stunnel_unit)" 2>/dev/null && log "stunnel di-restart (cert baru aktif)" \
+          || log "restart stunnel gagal (amankah? cek: systemctl status $(stunnel_unit))"
         log "SELESAI — domain & cert siap."
         exit 0
       fi
@@ -162,8 +169,8 @@ fi
     -keyout /etc/mb-ssh2/key.pem -out /etc/mb-ssh2/cert.pem \
     -subj "/CN=$DOM" 2>/dev/null
 # restart stunnel agar cert (self-signed/lama) ter-load
-systemctl restart stunnel 2>/dev/null && log "stunnel di-restart (cert aktif)" \
-  || log "restart stunnel gagal — cek: systemctl status stunnel"
+systemctl restart "$(stunnel_unit)" 2>/dev/null && log "stunnel di-restart (cert aktif)" \
+  || log "restart stunnel gagal — cek: systemctl status $(stunnel_unit)"
 log "cert siap: /etc/mb-ssh2/cert.pem (self-signed CN=$DOM) — pakai opsi 1 (Let's Encrypt) utk cert asli."
 echo ""
 echo "  (verifikasi: grep DOMAIN /etc/mb-ssh2/mb.conf)"

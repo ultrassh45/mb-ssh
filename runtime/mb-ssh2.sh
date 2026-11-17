@@ -60,6 +60,15 @@ mkdir -p "$STATE_DIR"
 [[ -f $USERS_JSON ]] || echo '{}' > "$USERS_JSON"
 
 log() { echo "[mb-ssh2 $(date '+%F %T')] $*"; }
+
+# nama unit stunnel: Debian/Ubuntu pakai "stunnel4", distro lain "stunnel"
+stunnel_unit() {
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl list-unit-files 2>/dev/null | grep -q '^stunnel4\.service'; then echo stunnel4; return; fi
+    if systemctl list-unit-files 2>/dev/null | grep -q '^stunnel\.service'; then echo stunnel; return; fi
+  fi
+  echo stunnel4
+}
 die() { echo "[mb-ssh2] ERROR: $*" >&2; exit 1; }
 
 # pool port CF (alternate; 80/443 = Marzban, 22 = admin)
@@ -1174,7 +1183,7 @@ PY
 do_svcheck() {
   # 14) status service + versi dropbear aktif
   echo "=== CEK STATUS SERVICE ==="
-  for svc in mb-edge dropbear-client stunnel mb-tgbot marzban; do
+  for svc in mb-edge dropbear-client "$(stunnel_unit)" mb-tgbot marzban; do
     if command -v systemctl >/dev/null 2>&1; then
       local act; act=$(systemctl is-active "$svc" 2>/dev/null || echo "n/a")
       local en; en=$(systemctl is-enabled "$svc" 2>/dev/null || echo "?")

@@ -1,6 +1,6 @@
 [Unit]
 Description=mb-edge — CF port pool edge proxy (SSH node)
-After=network.target dropbear-client.service stunnel.service
+After=network.target dropbear-client.service
 Wants=dropbear-client.service
 
 [Service]

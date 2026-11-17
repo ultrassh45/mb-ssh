@@ -149,7 +149,30 @@ for unit in mb-edge dropbear-client mb-tgbot; do
   install -m 644 "$ROOT/systemd/$unit.service" "/etc/systemd/system/$unit.service"
 done
 systemctl daemon-reload
-systemctl enable --now dropbear-client.service stunnel.service mb-edge.service
+# stunnel: Debian/Ubuntu memasang unit "stunnel4.service" (bukan "stunnel.service")
+if systemctl list-unit-files 2>/dev/null | grep -q "^stunnel4\.service"; then
+  STUNNEL_UNIT=stunnel4
+elif systemctl list-unit-files 2>/dev/null | grep -q "^stunnel\.service"; then
+  STUNNEL_UNIT=stunnel
+else
+  STUNNEL_UNIT=stunnel4
+fi
+# aktifkan stunnel pada /etc/default/stunnel4 (Debian) bila ada
+if [[ -f /etc/default/stunnel4 ]]; then
+  if grep -q "^ENABLED=" /etc/default/stunnel4; then
+    sed -i 's/^ENABLED=.*/ENABLED=1/' /etc/default/stunnel4
+  else
+    echo 'ENABLED=1' >> /etc/default/stunnel4
+  fi
+fi
+systemctl enable --now dropbear-client.service mb-edge.service || die "enable service inti gagal"
+if systemctl enable --now "${STUNNEL_UNIT}.service"; then
+  log "[ok] ${STUNNEL_UNIT} aktif (SSH TLS :22443)"
+else
+  log "PERINGATAN: ${STUNNEL_UNIT} gagal aktif — SSH TLS nonaktif, SSH direct tetap jalan"
+fi
+# simpan nama unit utk dipakai di tempat lain (domain/restart)
+printf 'STUNNEL_UNIT="%s"\n' "$STUNNEL_UNIT" >> /etc/mb-ssh2/mb.conf
 # bot TG: enable cuma kalau sudah ada token (idempotent upgrade)
 if grep -Eq '^TG_BOT_TOKEN=".{5,}"' /etc/mb-ssh2/mb.conf 2>/dev/null; then
   systemctl enable --now mb-tgbot.service
