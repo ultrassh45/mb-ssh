@@ -11,7 +11,7 @@
 #   mb-edge        : CF port pool → backends SSH (hot, zero restart per-user)
 #   dropbear       : 127.0.0.1:22022 (SSH Direct)
 #   stunnel        : 127.0.0.1:22443 (SSH TLS)
-#   badvpn-udpgw   : per-user instance (spawn on demand)
+#   badvpn-udpgw   : SHARED instance 7100/7200/7300/7400/7500/7600 (systemd, semua user)
 
 set -euo pipefail
 
@@ -133,6 +133,15 @@ sleep 1
 # binary dari repo dist/slowdns/ — tanpa token/curl remote. Default off (aman).
 if [ -f "$ROOT/install/05-slowdns.sh" ]; then
   bash "$ROOT/install/05-slowdns.sh" || log "SlowDNS setup skip/gagal (jangan-blokir node)"
+fi
+
+# ---------- 3c. UDPGW shared (Model B — pola autoscript) ----------
+# 6 daemon badvpn-udpgw dipakai BERSAMA semua user (Model B). Trade-off (diketahui):
+#   - enforce IP limit/bandwidth/quota tetap di layer TCP SSH (edge relay)
+#   - UDP tunnel tidak di-throttle per-user (badvpn tidak kenal user)
+# Idempotent, aman dijalankan ulang.
+if [ -f "$ROOT/install/06-udpgw-shared.sh" ]; then
+  bash "$ROOT/install/06-udpgw-shared.sh" || log "UDPGW shared setup skip/gagal (node tetap jalan)"
 fi
 
 # ---------- 4. Cron + verifikasi ----------

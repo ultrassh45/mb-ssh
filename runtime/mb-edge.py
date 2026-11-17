@@ -532,42 +532,11 @@ class Edge:
 
         ud = spec.get("udpgw")
         if ud and ud.get("port"):
-            target = ud.get("target", "127.0.0.1:17001")
-            await self.ensure_udpgw(user, target.split(":")[-1])
-
-            async def ud_handler(r, w, t=target):
-                peer = w.get_extra_info("peername")
-                if self.guard and not self.guard.allow(peer[0]):
-                    w.close()
-                    return
-                if not self.check_ip_limit(user, u, peer[0]):
-                    LOG(f"REJECT {user} {peer}: udpgw ip_limit")
-                    w.close()
-                    return
-                self.note_ip(user, u, peer[0])
-                if self._check_quota(user, u):
-                    w.close()
-                    return
-                st = self.stat(user)
-                st["sessions"] += 1
-                st["active"] += 1
-                u["conns"].add(w)
-                try:
-                    ur, uw = await asyncio.open_connection(*t.split(":"))
-                except OSError as e:
-                    LOG(f"user {user} udpgw target {t} unreachable: {e}")
-                    w.close()
-                    return
-                LOG(f"user {user} udpgw conn {peer} -> {t}")
-                await relay(r, w, ur, uw, u["b_down"], u["b_up"],
-                            stat=st, conns=u["conns"])
-                st["active"] -= 1
-                u["conns"].discard(w)
-
-            u["udpgw"] = {"port": int(ud["port"]), "target": target,
-                          "server": await self._raw_listen(int(ud["port"]), ud_handler)}
-            if not u["udpgw"]["server"]:
-                LOG(f"user {user}: udpgw port {ud['port']} gagal")
+            # Model B (shared): udpgw.port = port shared publik (7100/7200/...).
+            # Daemon badvpn-udpgw jalan via systemd (install/06-udpgw-shared.sh) —
+            # edge TIDAK spawn per-user, TIDAK buka listener sendiri.
+            # Enforcement IP limit / bw / quota tetap di jalur TCP (relay di atas).
+            u["udpgw"] = {"port": int(ud["port"]), "target": None, "server": None}
 
         self.users[user] = u
         LOG(f"ADD {user}: ssh :{port} -> {backend} "
@@ -645,7 +614,7 @@ class Edge:
                 "port": u["port"], "backend": u["backend"],
                 "bw_down_mbps": u["bw_down"], "bw_up_mbps": u["bw_up"],
                 "udpgw": ({"port": u["udpgw"]["port"], "target": u["udpgw"]["target"]}
-                          if u["udpgw"] and u["udpgw"]["server"] else None),
+                          if u["udpgw"] else None),
                 "quota_bytes": u["quota_bytes"],
                 "quota_used": self.quota_used(user),
                 "blocked": u["blocked"],

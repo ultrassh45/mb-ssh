@@ -196,9 +196,13 @@ Yang di-backup (per node, path R2: `$R2_PATH/{state,config}`):
    port & kuota & expire utuh (edge re-load dari `users.json` saat start).
 
 ## Fitur per-user
-- **UDPGW (telfon/video call)**: `--udp` saat `add` → dedicated port CF + `badvpn-udpgw`
-  lokal per-user. Client (HTTP Custom / SSH-UDP mode) pakai port itu untuk WhatsApp,
-  Telegram, video call. Auto-respawn saat edge restart. Binary: prebuilt → **auto
+- **UDPGW (telfon/video call)**: `--udp` saat `add` → user dipetakan ke salah satu
+  **port shared** `7100/7200/7300/7400/7500/7600` (Model B, pola autoscript). Satu set
+  daemon `badvpn-udpgw` dipakai bersama semua user (`--max-clients 999`) — **tidak
+  dibatasi jumlah user/port**, cocok untuk trial massal. Client (HTTP Custom /
+  SSH-UDP) pakai port shared itu untuk WhatsApp, Telegram, video call.
+  > Trade-off: limit IP / bandwidth / quota tetap di-enforce di jalur **TCP SSH**
+  > (edge relay). Tunnel UDP sendiri tidak di-throttle per-user (badvpn tak kenal user). Binary: prebuilt → **auto
   fallback build source** (prebuilt butuh GLIBC 2.38, gagal di Ubuntu 22) — build
   badvpn 1.999.130 `-DBUILD_UDPGW=ON`, selalu jalan di glibc lokal.
 - **Bandwidth** : token-bucket di edge (bytes/sec, down/up terpisah, hot-apply tanpa restart).
@@ -249,7 +253,7 @@ push `state`+`config` ke `R2_REMOTE:<R2_PATH>`. Tanpa `R2_REMOTE` = no-op (aman)
 | 443, 80 | Marzban (xray) |
 | 8443, 2096, 8080 | SSH shared (common, tanpa per-user limit) |
 | sisanya di PORT_POOL | per-user (dedicated) |
-| 170xx | badvpn-udpgw per-user (lokal) |
+| 7100, 7200, 7300, 7400, 7500, 7600 | **UDPGW shared** (badvpn-udpgw, dipakai bersama semua user) |
 
 Kapasitas default: 7 port user → 7 akun SSH / 3 akun SSH+UDP (2 port).
 Scale = tambah port di `PORT_POOL` (edge hot-reload, tidak perlu restart) atau node baru.

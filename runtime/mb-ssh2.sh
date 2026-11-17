@@ -46,7 +46,9 @@ UPDATE_CACHE="${UPDATE_CACHE:-/run/mb-ssh/update-available.txt}"
 DROPBEAR_DIR="${DROPBEAR_DIR:-/opt/dropbear}"
 DROPBEAR_DEFAULT="${DROPBEAR_DEFAULT:-2019.78}"
 BADVPN_BIN="${BADVPN_BIN:-/usr/local/bin/badvpn-udpgw}"
-BADVPN_PORT_BASE="${BADVPN_PORT_BASE:-17000}"
+# Model B (shared): daftar port UDPGW yang dipakai BERSAMA semua user.
+# Di-set install/06-udpgw-shared.sh ke mb.conf; fallback ke pola autoscript.
+UDPGW_SHARED_PORTS="${UDPGW_SHARED_PORTS:-7100 7200 7300 7400 7500 7600}"
 DROPBEAR_PORT="${DROPBEAR_PORT:-22022}"
 STUNNEL_PORT="${STUNNEL_PORT:-22443}"
 WARP_IF="${WARP_IF:-warp}"
@@ -120,21 +122,32 @@ for u,v in d.items():
   return 1
 }
 
-udpgw_port_for() { echo $(( BADVPN_PORT_BASE + $(id -u "$1") % 500 )); }
-
-spawn_udpgw() { # spawn_udpgw <user> <localport>
-  local user="$1" lp="$2"
-  [[ -x $BADVPN_BIN ]] || { log "badvpn binary tidak ada ($BADVPN_BIN) — skip udpgw"; return 1; }
-  # kill lama
-  pkill -f "badvpn-udpgw.*$lp" 2>/dev/null && sleep 0.3
-  setsid $BADVPN_BIN --listen-addr "127.0.0.1:$lp" --max-clients 32 \
-    --max-packets-per-connection 8 >/dev/null 2>&1 < /dev/null &
-  sleep 0.3
-  pgrep -f "badvpn-udpgw.*$lp" >/dev/null || { log "udpgw gagal start :$lp"; return 1; }
-  log "udpgw $user :$lp"
+udpgw_shared_pick() { # pick satu port shared utk user baru (minimal terpakai → merata)
+  local used
+  used=$(python3 -c "
+import json,os
+try:
+    d=json.load(open('$USERS_JSON'))
+except Exception:
+    d={}
+cnt={}
+for u,v in d.items():
+    if v.get('udpgw') and v['udpgw'].get('port'):
+        cnt[str(v['udpgw']['port'])] = cnt.get(str(v['udpgw']['port']),0)+1
+print(json.dumps(cnt))
+")
+  local least="" least_n=999999 p n
+  for p in $UDPGW_SHARED_PORTS; do
+    n=$(python3 -c "import json;print(json.loads('''$used''').get('$p',0))" 2>/dev/null || echo 0)
+    if [[ ${n:-0} -lt $least_n ]]; then least_n=$n; least=$p; fi
+  done
+  echo "$least"
 }
 
-kill_udpgw() { pkill -f "badvpn-udpgw.*$1" 2>/dev/null; }
+# Model B: TIDAK spawn per-user lagi. Daemon shared sudah jalan (install/06).
+# Fungsi dipertahankan utk kompatibilitas API lama, tapi hanya mengembalikan port sama.
+spawn_udpgw() { return 0; }
+kill_udpgw() { return 0; }
 
 warp_rule_add() { # warp_rule_add <user>
   local uid tid
@@ -197,7 +210,7 @@ Port List   :
   (semua port aktif via Cloudflare — pilih salah satu; $port = port akun ini)
 EOF
   [[ -n $udp ]] && cat >> "$STATE_DIR/client-$user.txt" <<EOF
-UDPGW       : $udp      (via Cloudflare)
+UDPGW       : $udp      (shared UDP — via Cloudflare)
 EOF
   # SlowDNS (aktif kalau SLOWDNS_ENABLED=1 di mb.conf) — satu akun SSH otomatis dapat slowdns
   if [[ "${SLOWDNS_ENABLED:-0}" == "1" && -n "${SLOWDNS_DOMAIN:-}" && -n "${SLOWDNS_PUBKEY:-}" ]]; then
@@ -299,10 +312,10 @@ do_add() {
   local spec="{\"cmd\":\"add\",\"user\":\"$user\",\"port\":$port,\"backend\":\"$backend_addr\",\"bw_down_mbps\":$bwd,\"bw_up_mbps\":$bwu,\"ip_limit\":${ip_limit:-0}"
   local lp="" udpport=""
   if [[ $udp -eq 1 ]]; then
-    udpport=$(pick_port) || die "port pool habis untuk udpgw"
-    lp=$(udpgw_port_for "$user")
-    if ! spawn_udpgw "$user" "$lp"; then udp=0; fi
-    [[ $udp -eq 1 ]] && spec="$spec,\"udpgw\":{\"port\":$udpport,\"target\":\"127.0.0.1:$lp\"}"
+    # Model B: pilih satu port shared yang paling sedikit terpakai (round-robin merata)
+    udpport=$(udpgw_shared_pick)
+    [[ -n $udpport ]] || die "UDPGW_SHARED_PORTS kosong (cek install/06-udpgw-shared.sh)"
+    spec="$spec,\"udpgw\":{\"port\":\"$udpport\"}"
   fi
   spec="$spec,\"quota_gb\":$quota,\"expire_ts\":$pexp}"
 
@@ -316,7 +329,7 @@ do_add() {
   [[ $warp -eq 1 ]] && warp_rule_add "$user" || true
 
   local udp_json=""
-  [[ $udp -eq 1 ]] && udp_json=\",\"udpgw\":{\"port\":$udpport,\"target\":\"127.0.0.1:$lp\"}\"
+  [[ $udp -eq 1 ]] && udp_json=",\"udpgw\":{\"port\":\"$udpport\"}"
   jset "$user" "{\"pass\":\"$pass\",\"port\":$port,\"backend\":\"$backend\",\"expire_ts\":$pexp,\"days\":$days,\"bw_down_mbps\":$bwd,\"bw_up_mbps\":$bwu,\"ip_limit\":${ip_limit:-0},\"created\":$now,\"warp\":$warp,\"quota_gb\":$quota$udp_json}"
   write_client_info "$user"
   local extra=""
@@ -331,10 +344,7 @@ do_del() {
   local port
   port=$(jget "$user" "e.get('port','')")
   edge_ctl "{\"cmd\":\"remove\",\"user\":\"$user\"}" >/dev/null || true
-  if [[ -n $(jget "$user" "e.get('udpgw',{}).get('target','')") ]]; then
-    local lp; lp=$(jget "$user" "e.get('udpgw',{}).get('target','').split(':')[-1]")
-    kill_udpgw "$lp"
-  fi
+  # Model B (shared udpgw): tidak ada daemon per-user yang perlu dimatikan.
   warp_rule_del "$user"
   id -u "$user" &>/dev/null && userdel -r "$user" 2>/dev/null
   jdel "$user"
