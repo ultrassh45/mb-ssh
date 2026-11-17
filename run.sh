@@ -70,6 +70,14 @@ if command -v os_check >/dev/null 2>&1; then
   log "OS terdeteksi: $OS_OK"
 fi
 
+# Debian 10/11 EOL: mirror vendor sering 404 (security) -> alihkan ke archive.debian.org
+if command -v os_fix_eol_mirror >/dev/null 2>&1; then
+  if os_fix_eol_mirror; then
+    log "repo Debian EOL dialihkan ke archive.debian.org — apt-get update..."
+    apt-get update -qq >/dev/null 2>&1 || log "apt-get update gagal (lanjut)"
+  fi
+fi
+
 [[ $EUID -eq 0 ]] || die "jalankan sebagai root"
 command -v python3 >/dev/null || die "python3 tidak ada"
 
