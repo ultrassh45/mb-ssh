@@ -36,30 +36,35 @@ mkdir -p "$DROPBEAR_DIR"
 
 _dropbear_build() {
   # arg: versi (mis 2019.78) → source tar.gz tag DROPBEAR_<versi> → binary
+  # CATATAN: stdout fungsi ini TIDAK dipakai (dibuang ke stderr oleh pemanggil);
+  # semua log pakai >&2 supaya tidak mengotori $() di _dropbear_resolve.
   local ver="$1"
   local src="/opt/dropbear/src/dropbear-DROPBEAR_${ver}"
   rm -rf "$src"
   mkdir -p /opt/dropbear/src
-  log "dropbear build DROPBEAR_${ver} ..."
-  if curl -fsSL -m 120 "https://github.com/mkj/dropbear/archive/refs/tags/DROPBEAR_${ver}.tar.gz" | tar xz -C /opt/dropbear/src 2>/dev/null; then
+  log "dropbear build DROPBEAR_${ver} ..." >&2
+  if curl -fsSL -m 120 "https://github.com/mkj/dropbear/archive/refs/tags/DROPBEAR_${ver}.tar.gz" 2>/dev/null \
+       | tar xz -C /opt/dropbear/src 2>/dev/null; then
     (
-      cd "/opt/dropbear/src/dropbear-DROPBEAR_${ver}" && \
+      cd "/opt/dropbear/src/dropbear-DROPBEAR_${ver}" || exit 1
       autoreconf -i >/dev/null 2>&1
-      ./configure 2>/dev/null && \
-      make -j"$(nproc)" >/dev/null 2>&1
-    )
+      ./configure >/dev/null 2>&1 && make -j"$(nproc)" >/dev/null 2>&1
+    ) >&2
     if [[ -x "/opt/dropbear/src/dropbear-DROPBEAR_${ver}/dropbear" ]]; then
-      cp "/opt/dropbear/src/dropbear-DROPBEAR_${ver}/dropbear" "$DROPBEAR_DIR/dropbear-${ver}"
-      cp "/opt/dropbear/src/dropbear-DROPBEAR_${ver}/dropbearmulti" "$DROPBEAR_DIR/dropbearmulti-${ver}" 2>/dev/null || true
-      log "dropbear ${ver} build OK"
+      install -m 755 "/opt/dropbear/src/dropbear-DROPBEAR_${ver}/dropbear" "$DROPBEAR_DIR/dropbear-${ver}" || return 1
+      [[ -x "/opt/dropbear/src/dropbear-DROPBEAR_${ver}/dropbearmulti" ]] && \
+        install -m 755 "/opt/dropbear/src/dropbear-DROPBEAR_${ver}/dropbearmulti" "$DROPBEAR_DIR/dropbearmulti-${ver}" 2>/dev/null
+      log "dropbear ${ver} build OK" >&2
       return 0
     fi
   fi
-  log "dropbear ${ver} build GAGAL"
+  log "dropbear ${ver} build GAGAL" >&2
   return 1
 }
 
 # pilih versi: loop default → list fallback
+# PENTING: semua progress ke stderr, stdout HANYA untuk nilai versi
+# (kalau tidak, $(...) menangkap log build → symlink jadi rusak)
 _dropbear_resolve() {
   local v="$DROPBEAR_DEFAULT"
   while :; do
@@ -68,7 +73,7 @@ _dropbear_resolve() {
       echo "$v"
       return 0
     fi
-    if _dropbear_build "$v"; then
+    if _dropbear_build "$v" >&2; then
       echo "$v"
       return 0
     fi
@@ -83,13 +88,19 @@ _dropbear_resolve() {
 }
 
 # install versi aktif → /usr/local/bin/dropbear (symlink)
-PICKED=$(_dropbear_resolve)
-if [[ -z $PICKED ]]; then
+PICKED="$(_dropbear_resolve)"
+# sanitasi: ambil baris terakhir yang berisi pola versi (jaga-jaga bila ada noise)
+PICKED="$(printf '%s\n' "$PICKED" | grep -E '^[0-9]{4}\.[0-9]{2}$' | tail -1)"
+if [[ -z "$PICKED" || ! -x "$DROPBEAR_DIR/dropbear-${PICKED}" ]]; then
   log "SEMUA versi dropbear gagal build — fallback ke apt dropbear"
   apt-get install -y -qq dropbear >/dev/null || die "dropbear gagal total"
 else
-  ln -sf "$DROPBEAR_DIR/dropbear-${PICKED}" /usr/local/bin/dropbear
-  ln -sf "$DROPBEAR_DIR/dropbearmulti-${PICKED}" /usr/local/bin/dropbearmulti 2>/dev/null || true
+  mkdir -p /usr/local/bin
+  ln -sfn "$DROPBEAR_DIR/dropbear-${PICKED}" /usr/local/bin/dropbear \
+    || die "symlink dropbear gagal ($DROPBEAR_DIR/dropbear-${PICKED})"
+  if [[ -x "$DROPBEAR_DIR/dropbearmulti-${PICKED}" ]]; then
+    ln -sfn "$DROPBEAR_DIR/dropbearmulti-${PICKED}" /usr/local/bin/dropbearmulti || true
+  fi
   log "dropbear aktif: ${PICKED} (${BA})"
 fi
 
